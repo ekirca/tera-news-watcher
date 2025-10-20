@@ -182,6 +182,12 @@ def job():
         except Exception as e:
             print("Hata", kw, e)
 
+def daily_ping():
+    """Her sabah sistemin ayakta olduğunu göstermek için ping mesajı yollar."""
+    send_telegram("🟢 <b>Bot aktif</b> – sistem çalışıyor ✅")
+    print(datetime.utcnow(), "- Günlük ping gönderildi.")
+
+    
     if new:
         for kw, it in new:
             msg = f"📰 <b>{kw.upper()}</b>\n{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
@@ -203,6 +209,9 @@ def scheduler_thread():
     else:
         job()
         schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
+
+    schedule.every().day.at("09:15").do(daily_ping)  # Her sabah 09:00'da ping at
+
 
     while True:
         schedule.run_pending()
