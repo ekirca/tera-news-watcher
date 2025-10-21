@@ -23,8 +23,13 @@ POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN") or 10)
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
 
-# Botun başlama anı: bundan önceki haberleri asla gönderme
-START_TIME = datetime.utcnow()
+# geçici teşhis için aç/kapat
+DISABLE_DOMAIN_FILTER = True   # <--- 30 dk’lık testte True yap
+
+from datetime import datetime, timezone, timedelta
+
+# Botun başlama anı: test için 3 saat geri al
+START_TIME = datetime.utcnow() - timedelta(hours=3)
 
 # --- TERA grubu ifadeleri (senin verdiğin liste + kısaltmalar) ---
 TERA_COMPANY_PHRASES = [
@@ -196,6 +201,13 @@ def job():
     seen = load_seen()
     new  = []
     for kw in KEYWORDS:
+        items = parse_rss(google_news_rss(kw))
+print(f"[DEBUG] {kw} -> {len(items)} sonuç")
+for t in [it['title'] for it in items[:5]]:
+    print("  -", t)
+# ardından mevcut filtre zincirinle devam:
+for it in items:
+    ...
         try:
             for it in parse_rss(google_news_rss(kw)):
                 # 1) tekrar kontrolü
