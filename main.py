@@ -207,26 +207,29 @@ for t in [it['title'] for it in items[:5]]:
     print("  -", t)
 # ardından mevcut filtre zincirinle devam:
 for it in items:
-    ...
-        try:
-            for it in parse_rss(google_news_rss(kw)):
+    try:
+        for it in parse_rss(google_news_rss(kw)):
                 # 1) tekrar kontrolü
-                if it["id"] in seen:
+        if it["id"] in seen:
                     continue
+
                 # 2) tarih filtresi
-                if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
+        if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
                     continue
+
                 # 3) domain filtresi
-                if not domain_allowed(it["link"]):
+        if not domain_allowed(it["link"]):
                     continue
+
                 # 4) şirket eşleşmesi (başlık + açıklama)
-                if not matches_company(it):
+        if not matches_company(it):
                     continue
 
                 new.append((kw, it))
                 seen.add(it["id"])
-        except Exception as e:
-            print("Hata", kw, e)
+
+    except Exception as e:
+            print("Hata:", kw, e)
 
     if new:
         for kw, it in new:
