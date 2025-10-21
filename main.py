@@ -1,249 +1,242 @@
 # -*- coding: utf-8 -*-
 """
-TERA grubu haber botu – 7/24 (Flask + schedule)
-- TERA şirket adları + TLY için Google News RSS tarar
-- Başlık + açıklama (description) eşleşmesi yapar
-- .tr/.com.tr uzantılarını ve geniş domain whitelist'i kabul eder
-- Google FeedBurner origLink kullanır (varsa)
-- Başlangıç anından önceki haberleri göndermez
-- Keep-alive ve 09:15 günlük ping içerir
+Tera News Watcher — Telegram bildirim botu
+- Google News RSS'ten anahtar kelimelere göre haber çeker
+- Filtreler: tekrar, zaman, domain beyaz liste, şirket eşleşmesi
+- Yeni bulunanları Telegram kanalına yollar
+- /health ve / endpointleri ile uptime kontrolü
 """
 
-import os, re, time, threading, hashlib, requests, schedule, xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+import os
+import time
+import threading
+import requests
+import schedule
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus, urlparse
+from flask import Flask, jsonify
 from email.utils import parsedate_to_datetime
-from flask import Flask
 
-# ------------------ ENV / SABİTLER ------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
-POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN") or 10)
+# =========================
+# Ortam değişkenleri / Ayar
+# =========================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
+# İlk çalıştırmada eski haberleri görmemek için zaman eşiği
+# (İstersen saat aralığını ayarlayabilirsin.)
+START_TIME = datetime.utcnow() - timedelta(hours=24)
+
+# Domain filtresini geçici kapatmak için True yapabilirsin (debug için)
+DISABLE_DOMAIN_FILTER = False
+
+# ----------------------------
+# Tera anahtar kelimeleri
+# ----------------------------
+KEYWORDS = [
+    "tera", "tehol", "trhol", "tly", "tera şirketleri"
+]
+
+# Şirket isimleri (eşleşme için; başlık/açıklama/link içinde arar — küçük harf)
+COMPANY_TOKENS = [
+    # Finans
+    "tera yatırım", "tera bank", "tera finans faktoring", "tera portföy",
+    "tera girişim sermayesi", "kointra", "tera finansal yatırımlar holding",
+    # Teknoloji
+    "tera yatırım teknoloji holding", "barikat grup", "barikat", "tra bilişim",
+    # Tarım / Su
+    "viva terra hayvancılık", "viva terra su",
+    # Hizmet
+    "tera özel güvenlik",
+    # Fon
+    "tly fonu", "tera ly", "tera ly fonu"
+]
+
+# Haberleri kaydettiğimiz dosyalar
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
 
-# geçici teşhis için aç/kapat
-DISABLE_DOMAIN_FILTER = True   # <--- 30 dk’lık testte True yap
-
-from datetime import datetime, timezone, timedelta
-
-# Botun başlama anı: test için 3 saat geri al
-START_TIME = datetime.utcnow() - timedelta(hours=3)
-
-# --- TERA grubu ifadeleri (senin verdiğin liste + kısaltmalar) ---
-TERA_COMPANY_PHRASES = [
-    # Finans
-    "tera yatırım",
-    "tera bank",
-    "tera finans faktoring",
-    "tera portföy",
-    "tera girişim sermayesi",
-    "kointra",
-    "tera finansal yatırımlar holding",
-    # Teknoloji
-    "tera yatırım teknoloji holding",
-    "barikat grup",
-    "tra bilişim",
-    # Tarım / Hayvancılık / Su
-    "viva terra hayvancılık",
-    "viva terra su",
-    # Hizmet
-    "tera özel güvenlik",
-    # Kısaltmalar / semboller
-    "tehol", "trhol", "tly", "tera şirketleri",
+# Domain beyaz liste (sondan eşleşir)
+ALLOWED_DOMAINS = [
+    # Büyük portallar
+    "hurriyet.com.tr", "milliyet.com.tr", "cnnturk.com", "ntv.com.tr",
+    "bbc.com", "reuters.com", "bloomberg.com", "bloomberght.com",
+    "aa.com.tr", "anadoluajansi.com.tr", "trthaber.com", "aljazeera.com",
+    # Ekonomi / teknoloji siteleri
+    "dunya.com", "ekonomim.com", "foreks.com", "investing.com", "ekoturk.com",
+    "webrazzi.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
+    "t24.com.tr", "bloomberght.com", "patronlardunyasi.com",
+    # Resmi / kurumsal
+    "kap.org.tr", "kamuyuaydinlatma.com",
+    # genel .com.tr ve .com da izinli olsun istersen aşağıyı aç
+    # ".com.tr", ".com"
 ]
 
-# Aramada kullanılacak anahtarlar (terimlerin kendisi)
-KEYWORDS = list(dict.fromkeys(TERA_COMPANY_PHRASES))
 
-# Domain whitelist + uzantı bazlı kabul
-DOMAIN_WHITELIST = {
-    "kap.org.tr", "bloomberght.com", "dunya.com", "haberturk.com",
-    "ntv.com.tr", "aa.com.tr", "trthaber.com", "hurriyet.com.tr",
-    "milliyet.com.tr", "sozcu.com.tr", "ekonomim.com", "borsagundem.com",
-    "investing.com", "tr.investing.com", "investing.com.tr",
-    "reuters.com", "foreks.com", "foreksnews.com",
-}
-ALLOWED_SUFFIXES = [".com.tr", ".gov.tr", ".edu.tr", ".org.tr", ".net.tr", ".tr"]
-
-# Teşhis için hızlı aç/kapat (geçici). True yaparsan domain filtresi kapanır.
-DISABLE_DOMAIN_FILTER = False
-
-# ------------------ FLASK ------------------
-app = Flask(__name__)
-
-@app.get("/")
-def home():
-    return "Alive", 200
-
-@app.get("/health")
-def health():
-    return {"ok": True, "time": datetime.utcnow().isoformat()}, 200
-
-# ------------------ YARDIMCI ------------------
-def send_telegram(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ TELEGRAM_BOT_TOKEN/CHAT_ID eksik.")
-        return
-    url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    try:
-        r = requests.post(url, data=data, timeout=15)
-        print("Telegram gönderildi:", r.status_code)
-        if r.status_code != 200:
-            print("Yanıt:", r.text)
-    except Exception as e:
-        print("Telegram hata:", e)
-
-def google_news_rss(query: str) -> str:
-    # TR odaklı
-    q  = quote_plus(query + " site:tr OR site:.com OR site:.com.tr")
-    url = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    return resp.text
-
-def strip_html(s: str) -> str:
-    return re.sub(r"<[^>]+>", " ", s or "").strip()
-
-def parse_rss(rss_xml: str):
-    root = ET.fromstring(rss_xml)
-    items = []
-
-    for it in root.findall(".//item"):
-        title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link")  or "").strip()
-        guid  = (it.findtext("guid")  or "").strip()
-        pub   = (it.findtext("pubDate") or "").strip()
-
-        desc  = strip_html(it.findtext("description") or "")
-
-        # feedburner:origLink varsa gerçek link odur
-        try:
-            orig = it.find("{http://rssnamespace.org/feedburner/ext/1.0}origLink")
-            if orig is not None and orig.text:
-                link = orig.text.strip()
-        except Exception:
-            pass
-
-        # pubDate -> datetime (UTC naive)
-        pub_dt = None
-        if pub:
-            try:
-                pub_dt = parsedate_to_datetime(pub)
-                if pub_dt.tzinfo is not None:
-                    pub_dt = pub_dt.astimezone(timezone.utc).replace(tzinfo=None)
-            except Exception:
-                pub_dt = None
-
-        uid = guid or hashlib.sha256((link + "||" + title).encode("utf-8")).hexdigest()
-        items.append({
-            "id": uid,
-            "title": title,
-            "desc": desc,
-            "link": link,
-            "pub": pub,
-            "pub_dt": pub_dt
-        })
-    return items
-
-def load_seen():
-    if not os.path.exists(SEEN_FILE):
-        return set()
-    return set(l.strip() for l in open(SEEN_FILE, encoding="utf-8") if l.strip())
-
-def save_seen(seen: set):
-    open(SEEN_FILE, "w", encoding="utf-8").write("\n".join(seen))
-
+# =========================
+# Yardımcı fonksiyonlar
+# =========================
 def domain_allowed(link: str) -> bool:
+    """Link'in domaini beyaz listedeyse True döndürür."""
     if DISABLE_DOMAIN_FILTER:
         return True
     try:
-        host = (urlparse(link).hostname or "").lower()
-        if host.startswith("www."):
-            host = host[4:]
-
-        # 1) Beyaz listede ise kabul
-        if host in DOMAIN_WHITELIST:
-            return True
-
-        # 2) Uzantı kabul listesi
-        for suf in ALLOWED_SUFFIXES:
-            if host.endswith(suf):
+        netloc = urlparse(link).netloc.lower()
+        # www. kaldır
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        for d in ALLOWED_DOMAINS:
+            if netloc.endswith(d):
                 return True
-
         return False
     except Exception:
         return False
 
-def matches_company(item) -> bool:
-    haystack = (item.get("title","") + " " + item.get("desc","")).lower()
-    return any(p in haystack for p in TERA_COMPANY_PHRASES)
 
-# ------------------ İŞ AKIŞI ------------------
+def matches_company(item: dict) -> bool:
+    """Şirket isimlerinden biri başlık/açıklama/link içinde geçiyorsa True."""
+    text = " ".join([
+        str(item.get("title") or ""),
+        str(item.get("desc") or ""),
+        str(item.get("link") or "")
+    ]).lower()
+    return any(tok in text for tok in COMPANY_TOKENS)
+
+
+def send_telegram(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    try:
+        r = requests.post(url, data=data, timeout=15)
+        print("Telegram gönderildi:", r.status_code)
+    except Exception as e:
+        print("Telegram hata:", e)
+
+
+def google_news_rss(query: str) -> str:
+    q = quote_plus(query + " site:tr OR site:.com OR site:.com.tr")
+    u = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
+    r = requests.get(u, timeout=30)
+    r.raise_for_status()
+    return r.text
+
+
+def parse_rss(xml_text: str):
+    """RSS'i parse edip {id,title,link,pub,pub_dt,desc} döndürür."""
+    root = ET.fromstring(xml_text)
+    items = []
+    for it in root.findall(".//item"):
+        title = (it.findtext("title") or "").strip()
+        link  = (it.findtext("link") or "").strip()
+        guid  = (it.findtext("guid") or link).strip()
+        pub   = (it.findtext("pubDate") or "").strip()
+        desc  = (it.findtext("description") or "").strip()
+
+        pub_dt = None
+        if pub:
+            try:
+                pub_dt = parsedate_to_datetime(pub)
+                # timezone-aware olmayanı UTC'le
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=None)
+                else:
+                    pub_dt = pub_dt.astimezone(tz=None).replace(tzinfo=None)
+            except Exception:
+                pub_dt = None
+
+        items.append({
+            "id": guid or link or title,
+            "title": title,
+            "link": link,
+            "pub": pub,
+            "pub_dt": pub_dt,
+            "desc": desc,
+        })
+    return items
+
+
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    with open(SEEN_FILE, "r", encoding="utf-8") as f:
+        return set(l.strip() for l in f if l.strip())
+
+
+def save_seen(seen: set):
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(seen))
+
+
 def bootstrap():
-    """İlk çalıştırmada mevcut haberleri 'görüldü' işaretler; bildirim göndermez."""
+    """İlk çalıştırmada mevcutları işaretler, bildirim göndermez."""
     seen = load_seen()
     added = 0
     for kw in KEYWORDS:
         try:
-            for it in parse_rss(google_news_rss(kw)):
+            xml = google_news_rss(kw)
+            for it in parse_rss(xml):
                 if it["id"] not in seen:
-                    seen.add(it["id"]); added += 1
+                    seen.add(it["id"])
+                    added += 1
         except Exception as e:
-            print("Bootstrap hata", kw, e)
+            print("Bootstrap hata:", kw, e)
     save_seen(seen)
-    open(INIT_FILE, "w").write(START_TIME.isoformat())
+    with open(INIT_FILE, "w", encoding="utf-8") as f:
+        f.write(datetime.utcnow().isoformat())
     print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
+
+# =========================
+# Ana iş — periyodik tarama
+# =========================
 def job():
     seen = load_seen()
-    new  = []
+    new = []
+
     for kw in KEYWORDS:
-        items = parse_rss(google_news_rss(kw))
-print(f"[DEBUG] {kw} -> {len(items)} sonuç")
-for t in [it['title'] for it in items[:5]]:
-    print("  -", t)
-# ardından mevcut filtre zincirinle devam:
-for it in items:
-    try:
-        for it in parse_rss(google_news_rss(kw)):
+        try:
+            xml = google_news_rss(kw)
+            items = parse_rss(xml)
+
+            for it in items:
                 # 1) tekrar kontrolü
-        if it["id"] in seen:
+                if it["id"] in seen:
                     continue
 
-                # 2) tarih filtresi
-        if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
+                # 2) zaman filtresi
+                if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
                     continue
 
                 # 3) domain filtresi
-        if not domain_allowed(it["link"]):
+                if not domain_allowed(it["link"]):
                     continue
 
-                # 4) şirket eşleşmesi (başlık + açıklama)
-        if not matches_company(it):
+                # 4) şirket eşleşmesi (başlık+açıklama)
+                if not matches_company(it):
                     continue
 
                 new.append((kw, it))
                 seen.add(it["id"])
 
-    except Exception as e:
+        except Exception as e:
             print("Hata:", kw, e)
 
     if new:
         for kw, it in new:
-            msg = f"📰 <b>{kw.upper()}</b>\n{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
+            msg = (
+                f"📰 <b>{kw.upper()}</b>\n"
+                f"{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
+            )
             send_telegram(msg)
         save_seen(seen)
         print(datetime.utcnow(), "-", len(new), "haber gönderildi.")
     else:
         print(datetime.utcnow(), "- Yeni haber yok.")
 
-def daily_ping():
-    """Her sabah sistemin ayakta olduğunu göstermek için ping mesajı yollar."""
-    send_telegram("🟢 <b>Bot aktif</b> – sistem çalışıyor ✅")
-    print(datetime.utcnow(), "- Günlük ping gönderildi.")
 
 def scheduler_thread():
     booted_now = False
@@ -255,38 +248,35 @@ def scheduler_thread():
         print("⏳ Başlangıç sessiz modu: ilk döngüde bildirim yok.")
         schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
     else:
+        # daha önce çalışmışsa ilk anda bir kere dene
         job()
         schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
-
-    # Günlük ping – saatini sen 09:15 yaptım demiştin
-    schedule.every().day.at("09:15").do(daily_ping)
 
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-def keepalive_thread():
-    url = os.getenv("KEEPALIVE_URL")
-    if not url:
-        return
-    while True:
-        try:
-            requests.get(url, timeout=10)
-        except Exception:
-            pass
-        time.sleep(240)  # 4 dakikada bir ping
 
-# ------------------ RESET (opsiyonel) ------------------
-if os.getenv("RESET") == "1":
-    for f in (SEEN_FILE, INIT_FILE):
-        try:
-            os.remove(f); print("Silindi:", f)
-        except FileNotFoundError:
-            pass
+# =========================
+# Flask (health/keepalive)
+# =========================
+app = Flask(__name__)
 
-# ------------------ ENTRYPOINT ------------------
-if __name__ == "__main__":
-    print("Routes:", app.url_map)
+@app.get("/")
+def home():
+    return "Alive", 200
+
+@app.get("/health")
+def health():
+    return jsonify(ok=True, time=datetime.utcnow().isoformat()), 200
+
+
+def main():
+    # işleyici thread’i
     threading.Thread(target=scheduler_thread, daemon=True).start()
-    threading.Thread(target=keepalive_thread, daemon=True).start()
+    # web (health)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
+
+if __name__ == "__main__":
+    main()
