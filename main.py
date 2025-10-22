@@ -67,7 +67,9 @@ ALLOWED_DOMAINS = [
     # Ekonomi / teknoloji siteleri
     "dunya.com", "ekonomim.com", "foreks.com", "investing.com", "ekoturk.com",
     "webrazzi.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
-    "t24.com.tr", "bloomberght.com", "patronlardunyasi.com",
+    "t24.com.tr", "bloomberght.com", "patronlardunyasi.com","borsagundem.com.tr",
+    "ekonomim.com","finansgundem.com","bigpara.hurriyet.com.tr","haberturk.com",
+    "milliyet.com.tr","tr.investing.com"
     # Resmi / kurumsal
     "kap.org.tr", "kamuyuaydinlatma.com",
     # genel .com.tr ve .com da izinli olsun istersen aşağıyı aç
@@ -95,14 +97,11 @@ def domain_allowed(link: str) -> bool:
         return False
 
 
-def matches_company(item: dict) -> bool:
-    """Şirket isimlerinden biri başlık/açıklama/link içinde geçiyorsa True."""
-    text = " ".join([
-        str(item.get("title") or ""),
-        str(item.get("desc") or ""),
-        str(item.get("link") or "")
-    ]).lower()
-    return any(tok in text for tok in COMPANY_TOKENS)
+def matches_company(it):
+    text = (it["title"] + " " + it.get("summary", "")).lower()
+    keywords = ["tera", "tera yatırım", "tera portföy", "barikat", "tra bilişim", "viva terra"]
+    return any(k in text for k in keywords)
+
 
 
 def send_telegram(text: str) -> None:
