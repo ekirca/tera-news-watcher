@@ -288,6 +288,12 @@ def job():
 def debug_view():
     return jsonify(last_stats), 200
 
+def matches_company(it):
+    # açıklamadaki HTML'ler temizlenmiş olmalı (parse_rss içinde)
+    text = (it["title"] + " " + it.get("desc", "") + " " + it.get("link", "")).lower()
+    # daha kapsayıcı eşleşme
+    tokens = [t.lower() for t in COMPANY_TOKENS] + ["tera", "tehol", "trhol", "tly", "tera yatırım"]
+    return any(tok in text for tok in tokens)
 
 
 # =========================
