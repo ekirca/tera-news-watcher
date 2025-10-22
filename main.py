@@ -27,10 +27,10 @@ POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
 # İlk çalıştırmada eski haberleri görmemek için zaman eşiği
 # (İstersen saat aralığını ayarlayabilirsin.)
-START_TIME = datetime.utcnow() - timedelta(hours=24)
+START_TIME = datetime.utcnow() - timedelta(hours=3)
 
 # Domain filtresini geçici kapatmak için True yapabilirsin (debug için)
-DISABLE_DOMAIN_FILTER = False
+DISABLE_DOMAIN_FILTER = True
 
 # ----------------------------
 # Tera anahtar kelimeleri
