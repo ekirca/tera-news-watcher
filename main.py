@@ -30,7 +30,7 @@ POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 START_TIME = datetime.now(timezone.utc) - timedelta(hours=24)
 
 # Geçici teşhis için domain filtresini devre dışı bırakmak istersen True yap
-DISABLE_DOMAIN_FILTER = False
+DISABLE_DOMAIN_FILTER = True
 
 # Log detay seviyesi (teşhis için True)
 DEBUG_VERBOSE = True
