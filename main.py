@@ -64,18 +64,15 @@ ALLOWED_DOMAINS = [
     "hurriyet.com.tr", "milliyet.com.tr", "cnnturk.com", "ntv.com.tr",
     "bbc.com", "reuters.com", "bloomberg.com", "bloomberght.com",
     "aa.com.tr", "anadoluajansi.com.tr", "trthaber.com", "aljazeera.com",
-    # Ekonomi / teknoloji siteleri
-    "dunya.com", "ekonomim.com", "foreks.com", "investing.com", "ekoturk.com",
-    "webrazzi.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
-    "t24.com.tr", "bloomberght.com", "patronlardunyasi.com","borsagundem.com.tr",
-    "ekonomim.com","finansgundem.com","bigpara.hurriyet.com.tr","haberturk.com",
-    "milliyet.com.tr","tr.investing.com"
+    # Ekonomi / finans
+    "dunya.com", "ekonomim.com", "foreks.com", "investing.com", "tr.investing.com",
+    "ekoturk.com", "webrazzi.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
+    "t24.com.tr", "patronlardunyasi.com", "borsagundem.com.tr", "finansgundem.com",
+    "bigpara.hurriyet.com.tr",
     # Resmi / kurumsal
-    "kap.org.tr", "kamuyuaydinlatma.com",
-    # genel .com.tr ve .com da izinli olsun istersen aşağıyı aç
-    # ".com.tr", ".com"
+    "kap.org.tr", "kamuyuaydinlatma.com"
 ]
-
+  
 
 # =========================
 # Yardımcı fonksiyonlar
@@ -98,7 +95,7 @@ def domain_allowed(link: str) -> bool:
 
 
 def matches_company(it):
-    text = (it["title"] + " " + it.get("summary", "")).lower()
+    text = (it["title"] + " " + it.get("desc", "") + " " + it.get("link", "")).lower()
     keywords = ["tera", "tera yatırım", "tera portföy", "barikat", "tra bilişim", "viva terra"]
     return any(k in text for k in keywords)
 
@@ -124,25 +121,35 @@ def google_news_rss(query: str) -> str:
     return r.text
 
 
+import re
+
+def _strip_html(s: str) -> str:
+    return re.sub(r"<[^>]+>", " ", s or "").strip()
+
 def parse_rss(xml_text: str):
-    """RSS'i parse edip {id,title,link,pub,pub_dt,desc} döndürür."""
     root = ET.fromstring(xml_text)
     items = []
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link") or "").strip()
-        guid  = (it.findtext("guid") or link).strip()
+        link  = (it.findtext("link")  or "").strip()
+        guid  = (it.findtext("guid")  or link).strip()
         pub   = (it.findtext("pubDate") or "").strip()
-        desc  = (it.findtext("description") or "").strip()
+        desc  = _strip_html(it.findtext("description") or "")
+
+        # feedburner:origLink varsa gerçek kaynak linki odur
+        try:
+            orig = it.find("{http://rssnamespace.org/feedburner/ext/1.0}origLink")
+            if orig is not None and orig.text:
+                link = orig.text.strip()
+        except Exception:
+            pass
 
         pub_dt = None
         if pub:
             try:
                 pub_dt = parsedate_to_datetime(pub)
-                # timezone-aware olmayanı UTC'le
-                if pub_dt.tzinfo is None:
-                    pub_dt = pub_dt.replace(tzinfo=None)
-                else:
+                # Zaman bilgisini naive UTC'ye indir
+                if pub_dt.tzinfo is not None:
                     pub_dt = pub_dt.astimezone(tz=None).replace(tzinfo=None)
             except Exception:
                 pub_dt = None
@@ -156,6 +163,7 @@ def parse_rss(xml_text: str):
             "desc": desc,
         })
     return items
+
 
 
 def load_seen():
