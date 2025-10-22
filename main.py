@@ -197,40 +197,79 @@ def bootstrap():
     print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
 
-# =========================
-# Ana iş — periyodik tarama
-# =========================
+# --- DEBUG bayrakları ---
+DEBUG_VERBOSE = True       # True: her döngüde detaylı log bas
+DISABLE_DOMAIN_FILTER = False  # Geçici teşhis için True yapabilirsin
+
+last_stats = {}  # /debug için son istatistikler
+
 def job():
+    global last_stats
     seen = load_seen()
     new = []
+    all_stats = {"run_utc": datetime.utcnow().isoformat(), "keywords": {}}
 
     for kw in KEYWORDS:
+        stat = {
+            "fetched": 0, "dup": 0, "time_drop": 0,
+            "domain_drop": 0, "company_drop": 0, "accepted": 0,
+            "samples_dropped": []
+        }
         try:
             xml = google_news_rss(kw)
             items = parse_rss(xml)
+            stat["fetched"] = len(items)
 
             for it in items:
-                # 1) tekrar kontrolü
+                title = it["title"] or ""
+                link  = it["link"]  or ""
+                pubdt = it.get("pub_dt")
+
+                # 1) tekrar
                 if it["id"] in seen:
+                    stat["dup"] += 1
                     continue
 
-                # 2) zaman filtresi
-                if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
+                # 2) zaman
+                if pubdt is not None and pubdt < START_TIME:
+                    stat["time_drop"] += 1
+                    if len(stat["samples_dropped"]) < 3:
+                        stat["samples_dropped"].append({"why":"time", "t":title, "p":str(pubdt)})
                     continue
 
-                # 3) domain filtresi
-                if not domain_allowed(it["link"]):
+                # 3) domain
+                if not domain_allowed(link):
+                    stat["domain_drop"] += 1
+                    if len(stat["samples_dropped"]) < 3:
+                        stat["samples_dropped"].append({"why":"domain", "t":title, "link":link})
                     continue
 
-                # 4) şirket eşleşmesi (başlık+açıklama)
+                # 4) şirket eşleşmesi
                 if not matches_company(it):
+                    stat["company_drop"] += 1
+                    if len(stat["samples_dropped"]) < 3:
+                        stat["samples_dropped"].append({"why":"company", "t":title})
                     continue
 
+                # kabul
+                stat["accepted"] += 1
                 new.append((kw, it))
                 seen.add(it["id"])
 
         except Exception as e:
             print("Hata:", kw, e)
+
+        all_stats["keywords"][kw] = stat
+
+        if DEBUG_VERBOSE:
+            print(f"[{kw}] fetched={stat['fetched']} "
+                  f"dup={stat['dup']} time_drop={stat['time_drop']} "
+                  f"domain_drop={stat['domain_drop']} company_drop={stat['company_drop']} "
+                  f"accepted={stat['accepted']}")
+            if stat["samples_dropped"]:
+                print(f"  örnek redler: {stat['samples_dropped']}")
+
+    last_stats = all_stats  # /debug için sakla
 
     if new:
         for kw, it in new:
@@ -244,24 +283,11 @@ def job():
     else:
         print(datetime.utcnow(), "- Yeni haber yok.")
 
+# --- /debug endpoint'i: Son tarama istatistiklerini gör ---
+@app.get("/debug")
+def debug_view():
+    return jsonify(last_stats), 200
 
-def scheduler_thread():
-    booted_now = False
-    if not os.path.exists(INIT_FILE):
-        bootstrap()
-        booted_now = True
-
-    if booted_now:
-        print("⏳ Başlangıç sessiz modu: ilk döngüde bildirim yok.")
-        schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
-    else:
-        # daha önce çalışmışsa ilk anda bir kere dene
-        job()
-        schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
 
 # =========================
