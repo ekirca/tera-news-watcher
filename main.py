@@ -72,6 +72,12 @@ ALLOWED_DOMAINS = [
     "kap.org.tr", "kamuyuaydinlatma.com",
 ]
 
+def test_notification():
+    test_msg = "🧪 Test bildirimi — sistem doğru çalışıyor!"
+    send_telegram(test_msg)
+    print("Test bildirimi gönderildi.")
+
+
 # =========================
 # FLASK ÖNCE TANIMLANIR!
 # =========================
@@ -301,10 +307,14 @@ def scheduler_thread():
         time.sleep(1)
 
 def main():
-    # tarayıcı thread
     threading.Thread(target=scheduler_thread, daemon=True).start()
-    # health server
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
+test_notification()
+
+if __name__ == "__main__":
+    main()
+
 
 if __name__ == "__main__":
     main()
