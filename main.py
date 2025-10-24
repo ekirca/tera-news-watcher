@@ -82,7 +82,7 @@ app = Flask(__name__)
 def home():
     return "Alive", 200
 
-@app.get("/health")
+@app.route("/health", methods=["GET", "HEAD"])
 def health():
     return jsonify(ok=True, time=datetime.now(timezone.utc).isoformat()), 200
 
