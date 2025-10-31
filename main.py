@@ -383,18 +383,17 @@ def keepalive():
 # 7) Flask app (health check)   #
 #################################
 
-app = Flask(__name__)
-
-@app.get("/")
+@app.route("/", methods=["GET", "HEAD"])
 def home():
     return "Alive", 200
 
-@app.get("/health")
+@app.route("/health", methods=["GET", "HEAD"])
 def health():
     return jsonify(
         ok=True,
         time=datetime.utcnow().isoformat()
     ), 200
+
 
 #################################
 # 8) Main entrypoint            #
