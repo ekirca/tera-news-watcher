@@ -383,6 +383,9 @@ def keepalive():
 # 7) Flask app (health check)   #
 #################################
 
+from flask import Flask, jsonify
+app = Flask(__name__)  # <-- BU satır önce gelmeli!
+
 @app.route("/", methods=["GET", "HEAD"])
 def home():
     return "Alive", 200
@@ -393,6 +396,7 @@ def health():
         ok=True,
         time=datetime.utcnow().isoformat()
     ), 200
+
 
 
 #################################
