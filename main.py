@@ -239,17 +239,18 @@ def test_notification():
     return "Test bildirimi gönderildi (Telegram’a bak 👀)", 200
 
 
+
 # ========= Entry =========
-# ========= Entry =========
+
 def main():
-    # İş planlayıcı (haber tarayıcı)
+    # Haber tarama thread’i
     threading.Thread(target=scheduler_thread, daemon=True).start()
-    # Keepalive (isteğe bağlı, cron-job.org kullanıyorsak bile dursun)
-    threading.Thread(target=keepalive, daemon=True).start()
-    # Web (health + test endpointleri)
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=8080)
+
+    # Flask web server (Render'ın verdiği PORT'u kullan!)
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
+
 
