@@ -206,18 +206,18 @@ def scheduler_thread():
         time.sleep(1)
 
 # ========= Keepalive (Render free uykuya karşı) =========
-def keepalive():
-    url = KEEPALIVE_URL.strip()
-    if not url:
-        print("KEEPALIVE_URL boş, keepalive pasif.")
-        return
-    while True:
-        try:
-            r = requests.get(url, timeout=10)
-            print("Keepalive ping:", r.status_code)
-        except Exception as e:
-            print("Keepalive hata:", e)
-        time.sleep(600)  # 10 dk
+import requests, time
+
+URL = "https://tera-news-watcher.onrender.com/health"
+
+while True:
+    try:
+        r = requests.get(URL, timeout=30)
+        print(f"{time.strftime('%H:%M:%S')} - {r.status_code}")
+    except Exception as e:
+        print(f"Hata: {e}")
+    time.sleep(600)  # her 10 dakikada bir GET isteği
+
 
 # ========= Flask (health/monitoring) =========
 app = Flask(__name__)
