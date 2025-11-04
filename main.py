@@ -230,6 +230,14 @@ def home():
 def health():
     return jsonify(ok=True, time=datetime.utcnow().isoformat()), 200
 
+
+@app.route("/test", methods=["GET"])
+def test_notification():
+    message = "🧪 Test bildirimi: TERA test haberi bulundu!"
+    send_telegram(message)   # <- burası önemli
+    return "Test bildirimi gönderildi (Telegram’a bak 👀)", 200
+
+
 # ========= Entry =========
 def main():
     # İş planlayıcı
