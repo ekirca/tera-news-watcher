@@ -19,6 +19,7 @@ from urllib.parse import quote_plus, urlparse
 from email.utils import parsedate_to_datetime
 from flask import Flask, jsonify
 
+
 # ========= Ayarlar / Env =========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -239,13 +240,16 @@ def test_notification():
 
 
 # ========= Entry =========
+# ========= Entry =========
 def main():
-    # İş planlayıcı
+    # İş planlayıcı (haber tarayıcı)
     threading.Thread(target=scheduler_thread, daemon=True).start()
-    # Keepalive
+    # Keepalive (isteğe bağlı, cron-job.org kullanıyorsak bile dursun)
     threading.Thread(target=keepalive, daemon=True).start()
-    # Web
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    # Web (health + test endpointleri)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
+
