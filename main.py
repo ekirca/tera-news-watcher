@@ -37,6 +37,11 @@ START_TIME = datetime.utcnow() - timedelta(hours=MAX_AGE_HOURS)
 # Domain filtresini komple kapatmak için True yap (debug için)
 DISABLE_DOMAIN_FILTER = False
 
+# Hata bildirimi için global durumlar
+LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
+LAST_ERROR_TIME = None        # son hata bildirimi zamanı
+ERROR_COOLDOWN_MIN = 30       # aynı tür hatayı en az kaç dakika arayla Telegram'a gönderelim
+
 # ----------------------------
 # Anahtar kelimeler
 # ----------------------------
@@ -125,6 +130,7 @@ ALLOWED_DOMAINS = [
 
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
+MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (çok fazlası gereksiz)
 
 
 # =========================
@@ -173,6 +179,23 @@ def send_telegram(text: str) -> None:
         debug_print("Telegram gönderildi:", r.status_code)
     except Exception as e:
         debug_print("Telegram hata:", e)
+
+def notify_error(message: str):
+    """Hata durumunda hem log'a yaz, hem de Telegram'a makul sıklıkta uyarı gönder."""
+    global LAST_ERROR_TIME
+    now = datetime.utcnow()
+
+    # Eğer daha önce hiç hata göndermediysek veya cooldown süresi dolduysa
+    if LAST_ERROR_TIME is None or (now - LAST_ERROR_TIME).total_seconds() > ERROR_COOLDOWN_MIN * 60:
+        try:
+            send_telegram(f"⚠️ Hata uyarısı:\n{message}")
+            LAST_ERROR_TIME = now
+        except Exception as e:
+            # Telegram da patlarsa en azından log'a düşsün
+            print("notify_error içinde hata:", e)
+
+    # Konsola her zaman yaz
+    print("ERROR:", message)
 
 
 def google_news_rss(query: str) -> str:
@@ -226,8 +249,14 @@ def load_seen():
 
 
 def save_seen(seen: set):
+    # Set sırasız, ama çok büyürse rastgele bazı eski kayıtlar uçmuş olur — problem değil.
+    if len(seen) > MAX_SEEN_IDS:
+        # herhangi 50 bini tut, geri kalanı sil
+        seen = set(list(seen)[:MAX_SEEN_IDS])
+
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(seen))
+
 
 
 def bootstrap():
@@ -258,9 +287,10 @@ def bootstrap():
 # =========================
 
 def job():
-    """Periyodik olarak çalışan ana tarama fonksiyonu."""
+    global LAST_JOB_TIME
+
     seen = load_seen()
-    new_items = []
+    new = []
 
     for kw in KEYWORDS:
         try:
@@ -284,26 +314,27 @@ def job():
                 if not matches_company(it):
                     continue
 
-                new_items.append((kw, it))
+                new.append((kw, it))
                 seen.add(it["id"])
 
         except Exception as e:
-            debug_print("Hata (RSS):", kw, e)
+            # Burada artık sadece print değil, Telegram uyarısı da var
+            notify_error(f"{kw!r} kelimesi taranırken hata oluştu: {e}")
 
-    if new_items:
-        for kw, it in new_items:
+    # Buraya kadar geldiysek job() başarıyla bitti sayıyoruz
+    LAST_JOB_TIME = datetime.utcnow()
+
+    if new:
+        for kw, it in new:
             msg = (
                 f"📰 <b>{kw.upper()}</b>\n"
-                f"{it['title']}\n"
-                f"{it['link']}\n"
-                f"{it.get('pub') or ''}"
+                f"{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
             )
             send_telegram(msg)
-
         save_seen(seen)
-        debug_print(datetime.utcnow(), "-", len(new_items), "haber gönderildi.")
+        print(LAST_JOB_TIME, "-", len(new), "haber gönderildi.")
     else:
-        debug_print(datetime.utcnow(), "- Yeni haber yok.")
+        print(LAST_JOB_TIME, "- Yeni haber yok.")
 
 
 def scheduler_thread():
@@ -336,7 +367,21 @@ def home():
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, time=datetime.utcnow().isoformat()), 200
+    now = datetime.utcnow()
+
+    if LAST_JOB_TIME is None:
+        last_job_iso = None
+        last_job_ago_sec = None
+    else:
+        last_job_iso = LAST_JOB_TIME.isoformat()
+        last_job_ago_sec = (now - LAST_JOB_TIME).total_seconds()
+
+    return jsonify(
+        ok=True,
+        time=now.isoformat(),
+        last_job=last_job_iso,
+        last_job_ago_seconds=last_job_ago_sec,
+    ), 200
 
 
 @app.get("/test")
