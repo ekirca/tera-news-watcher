@@ -1,256 +1,365 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Telegram bildirim botu (Render-friendly)
-- Google News RSS: anahtar kelimelere göre çek
-- Filtreler: tekrar, zaman, domain whitelist, şirket eşleşmesi
-- Yeni haberleri Telegram'a gönder
-- / ve /health endpointleri (Uptime/monitoring)
-- KEEPALIVE: Render free instance uykuya geçmesin diye periyodik self-ping
+Tera News Watcher — Render için sade ve temiz versiyon
+
+- Google News RSS'ten anahtar kelimelere göre haber çeker
+- Filtreler: tekrar, zaman, domain beyaz liste, Tera şirket eşleşmesi
+- Yeni haberleri Telegram kanalına yollar
+- /health ve /test endpointleri ile kontrol/test
 """
 
 import os
 import time
 import threading
-import requests
-import schedule
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus, urlparse
+import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+
+import requests
 from flask import Flask, jsonify
+import schedule
 
+# =========================
+# Ortam değişkenleri / Ayar
+# =========================
 
-# ========= Ayarlar / Env =========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))  # tarama periyodu (dk)
 
-# Render servis URL'ini KENDİ servisinle GÜNCELLE:
-KEEPALIVE_URL = os.getenv("KEEPALIVE_URL", "https://tera-news-watcher.onrender.com/health")
+# Haber tarama periyodu (dakika)
+POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
-# İlk çalıştırmada eski haberleri görmemek için zaman eşiği
-START_TIME = datetime.utcnow() - timedelta(hours=24)
+# "Eski haber" eşiği (UTC; son 24 saat)
+MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "24"))
+START_TIME = datetime.utcnow() - timedelta(hours=MAX_AGE_HOURS)
 
-# Geliştirirken domain filtresini kapatmak istersen True yap
+# Domain filtresini komple kapatmak için True yap (debug için)
 DISABLE_DOMAIN_FILTER = False
 
+# ----------------------------
 # Anahtar kelimeler
-KEYWORDS = ["tera", "tehol", "trhol", "tly", "tera şirketleri"]
+# ----------------------------
+KEYWORDS = [
+    "tera",
+    "tehol",
+    "trhol",
+    "tly",
+    "tera yatırım",
+    "tera şirketleri",
+]
 
-# Şirket eşleşmesi için tokenlar (küçük harf aranır)
+# ----------------------------
+# Şirket isimleri (eşleşme için)
+# ----------------------------
 COMPANY_TOKENS = [
     # Finans
-    "tera yatırım", "tera bank", "tera finans faktoring", "tera portföy",
-    "tera girişim sermayesi", "kointra", "tera finansal yatırımlar holding",
+    "tera yatırım",
+    "tera bank",
+    "tera finans faktoring",
+    "tera portföy",
+    "tera girişim sermayesi",
+    "kointra",
+    "tera finansal yatırımlar holding",
+
     # Teknoloji
-    "tera yatırım teknoloji holding", "barikat grup", "barikat", "tra bilişim",
+    "tera yatırım teknoloji holding",
+    "barikat grup",
+    "barikat",
+    "tra bilişim",
+
     # Tarım / Su
-    "viva terra hayvancılık", "viva terra su",
+    "viva terra hayvancılık",
+    "viva terra su",
+
     # Hizmet
     "tera özel güvenlik",
+
     # Fon
-    "tly fonu", "tera ly", "tera ly fonu"
+    "tly fonu",
+    "tera ly",
+    "tera ly fonu",
 ]
+
+# ----------------------------
+# Domain beyaz liste
+# ----------------------------
+ALLOWED_DOMAINS = [
+    # Büyük haber portalları
+    "hurriyet.com.tr",
+    "milliyet.com.tr",
+    "cnnturk.com",
+    "ntv.com.tr",
+    "bbc.com",
+    "reuters.com",
+    "bloomberg.com",
+    "bloomberght.com",
+    "aa.com.tr",
+    "trthaber.com",
+    "aljazeera.com",
+
+    # Ekonomi / Finans
+    "dunya.com",
+    "ekonomim.com",
+    "foreks.com",
+    "investing.com",
+    "ekoturk.com",
+    "haberturk.com",
+    "sozcu.com.tr",
+    "sabah.com.tr",
+    "t24.com.tr",
+    "patronlardunyasi.com",
+    "borsagundem.com.tr",
+    "finansgundem.com",
+    "bigpara.hurriyet.com.tr",
+    "tr.investing.com",
+
+    # Resmi / kurumsal
+    "kap.org.tr",
+    "kamuyuaydinlatma.com",
+]
+
+# =========================
+# Dosyalar
+# =========================
 
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
 
-# Domain beyaz liste (netloc sondan eşleşir)
-ALLOWED_DOMAINS = [
-    # Büyük portallar
-    "hurriyet.com.tr", "milliyet.com.tr", "cnnturk.com", "ntv.com.tr",
-    "bbc.com", "reuters.com", "bloomberg.com", "bloomberght.com",
-    "aa.com.tr", "trthaber.com", "aljazeera.com",
-    # Ekonomi/teknoloji
-    "dunya.com", "ekonomim.com", "foreks.com", "investing.com", "ekoturk.com",
-    "webrazzi.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr", "t24.com.tr",
-    "patronlardunyasi.com", "borsagundem.com.tr", "finansgundem.com",
-    "bigpara.hurriyet.com.tr", "tr.investing.com",
-    # Resmi
-    "kap.org.tr", "kamuyuaydinlatma.com",
-]
 
-# ========= Yardımcılar =========
+# =========================
+# Yardımcı fonksiyonlar
+# =========================
+
+def debug_print(*args):
+    """Basit log helper."""
+    print(*args, flush=True)
+
+
 def domain_allowed(link: str) -> bool:
+    """Link'in domaini beyaz listedeyse True döndürür."""
     if DISABLE_DOMAIN_FILTER:
         return True
     try:
         netloc = urlparse(link).netloc.lower()
         if netloc.startswith("www."):
             netloc = netloc[4:]
-        return any(netloc.endswith(d) for d in ALLOWED_DOMAINS)
+        for d in ALLOWED_DOMAINS:
+            if netloc.endswith(d):
+                return True
+        return False
     except Exception:
         return False
 
+
 def matches_company(it: dict) -> bool:
+    """Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?"""
     text = (it.get("title", "") + " " + it.get("desc", "")).lower()
-    return any(tok in text for tok in COMPANY_TOKENS)
+    # Her ihtimale karşı çekirdek bir anahtar kelime seti
+    base_keywords = ["tera", "tera yatırım", "barikat", "tra bilişim", "viva terra"]
+    tokens = COMPANY_TOKENS + base_keywords
+    return any(k in text for k in tokens)
+
 
 def send_telegram(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        debug_print("⚠️ TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID yok, mesaj gönderilmedi.")
         return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         r = requests.post(url, data=data, timeout=15)
-        print("Telegram gönderildi:", r.status_code)
+        debug_print("Telegram gönderildi:", r.status_code)
     except Exception as e:
-        print("Telegram hata:", e)
+        debug_print("Telegram hata:", e)
+
 
 def google_news_rss(query: str) -> str:
+    """Google News RSS URL'ini çağırır ve XML döndürür."""
     q = quote_plus(query + " site:tr OR site:.com OR site:.com.tr")
     u = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
     r = requests.get(u, timeout=30)
     r.raise_for_status()
     return r.text
 
+
 def parse_rss(xml_text: str):
+    """RSS'i parse edip {id,title,link,pub,pub_dt,desc} listesi döndürür."""
     root = ET.fromstring(xml_text)
     items = []
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link")  or "").strip()
-        guid  = (it.findtext("guid")  or link).strip()
+        link  = (it.findtext("link") or "").strip()
+        guid  = (it.findtext("guid") or link or title).strip()
         pub   = (it.findtext("pubDate") or "").strip()
         desc  = (it.findtext("description") or "").strip()
 
         pub_dt = None
         if pub:
             try:
-                pub_dt = parsedate_to_datetime(pub)
-                pub_dt = (pub_dt if pub_dt.tzinfo is None
-                          else pub_dt.astimezone(tz=None)).replace(tzinfo=None)
+                dt = parsedate_to_datetime(pub)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(tz=None).replace(tzinfo=None)
+                pub_dt = dt
             except Exception:
                 pub_dt = None
 
-        items.append({
-            "id": guid or link or title,
-            "title": title,
-            "link": link,
-            "pub": pub,
-            "pub_dt": pub_dt,
-            "desc": desc,
-        })
+        items.append(
+            {
+                "id": guid or link or title,
+                "title": title,
+                "link": link,
+                "pub": pub,
+                "pub_dt": pub_dt,
+                "desc": desc,
+            }
+        )
     return items
 
-def load_seen() -> set:
+
+def load_seen():
     if not os.path.exists(SEEN_FILE):
         return set()
     with open(SEEN_FILE, "r", encoding="utf-8") as f:
         return set(l.strip() for l in f if l.strip())
 
+
 def save_seen(seen: set):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(seen))
 
+
 def bootstrap():
-    seen, added = load_seen(), 0
+    """
+    İlk çalıştırmada mevcut haberlerin hepsini seen'e işaretler,
+    böylece bir anda eski yüzlerce haber Telegram'a düşmez.
+    """
+    seen = load_seen()
+    added = 0
     for kw in KEYWORDS:
         try:
             xml = google_news_rss(kw)
             for it in parse_rss(xml):
                 if it["id"] not in seen:
-                    seen.add(it["id"]); added += 1
+                    seen.add(it["id"])
+                    added += 1
         except Exception as e:
-            print("Bootstrap hata:", kw, e)
+            debug_print("Bootstrap hata:", kw, e)
+
     save_seen(seen)
     with open(INIT_FILE, "w", encoding="utf-8") as f:
         f.write(datetime.utcnow().isoformat())
-    print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
+    debug_print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
-# ========= Ana iş (periyodik tarama) =========
+
+# =========================
+# Ana iş — periyodik tarama
+# =========================
+
 def job():
+    """Periyodik olarak çalışan ana tarama fonksiyonu."""
     seen = load_seen()
-    new  = []
+    new_items = []
 
     for kw in KEYWORDS:
         try:
-            items = parse_rss(google_news_rss(kw))
+            xml = google_news_rss(kw)
+            items = parse_rss(xml)
+
             for it in items:
+                # 1) tekrar kontrolü
                 if it["id"] in seen:
                     continue
+
+                # 2) zaman filtresi
                 if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
                     continue
+
+                # 3) domain filtresi
                 if not domain_allowed(it["link"]):
                     continue
+
+                # 4) şirket eşleşmesi
                 if not matches_company(it):
                     continue
-                new.append((kw, it))
-                seen.add(it["id"])
-        except Exception as e:
-            print("Hata:", kw, e)
 
-    if new:
-        for kw, it in new:
-            msg = f"📰 <b>{kw.upper()}</b>\n{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
+                new_items.append((kw, it))
+                seen.add(it["id"])
+
+        except Exception as e:
+            debug_print("Hata (RSS):", kw, e)
+
+    if new_items:
+        for kw, it in new_items:
+            msg = (
+                f"📰 <b>{kw.upper()}</b>\n"
+                f"{it['title']}\n"
+                f"{it['link']}\n"
+                f"{it.get('pub') or ''}"
+            )
             send_telegram(msg)
+
         save_seen(seen)
-        print(datetime.utcnow(), "-", len(new), "haber gönderildi.")
+        debug_print(datetime.utcnow(), "-", len(new_items), "haber gönderildi.")
     else:
-        print(datetime.utcnow(), "- Yeni haber yok.")
+        debug_print(datetime.utcnow(), "- Yeni haber yok.")
+
 
 def scheduler_thread():
-    booted_now = False
+    """Schedule döngüsünü ayrı bir thread'de çalıştır."""
+    # İlk seferde bootstrap
     if not os.path.exists(INIT_FILE):
         bootstrap()
-        booted_now = True
 
-    if booted_now:
-        print("⏳ Başlangıç sessiz modu: ilk döngüde bildirim yok.")
-        schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
-    else:
-        job()
-        schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
+    # Çalışır çalışmaz bir defa dene
+    job()
+
+    # Sonra periyodik olarak devam et
+    schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
 
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# ========= Keepalive (Render free uykuya karşı) =========
-import requests, time
 
-URL = "https://tera-news-watcher.onrender.com/health"
+# =========================
+# Flask (health / test)
+# =========================
 
-while True:
-    try:
-        r = requests.get(URL, timeout=30)
-        print(f"{time.strftime('%H:%M:%S')} - {r.status_code}")
-    except Exception as e:
-        print(f"Hata: {e}")
-    time.sleep(600)  # her 10 dakikada bir GET isteği
-
-
-# ========= Flask (health/monitoring) =========
 app = Flask(__name__)
 
 @app.get("/")
 def home():
     return "Alive", 200
 
+
 @app.get("/health")
 def health():
     return jsonify(ok=True, time=datetime.utcnow().isoformat()), 200
 
 
-@app.route("/test", methods=["GET"])
+@app.get("/test")
 def test_notification():
+    """Telegram'a test mesajı göndermek için basit endpoint."""
     message = "🧪 Test bildirimi: TERA test haberi bulundu!"
-    send_telegram(message)   # <- burası önemli
+    send_telegram(message)
     return "Test bildirimi gönderildi (Telegram’a bak 👀)", 200
 
 
-
-# ========= Entry =========
+# =========================
+# Entry point
+# =========================
 
 def main():
-    # Haber tarama thread’i
+    # Haber tarama işini ayrı thread'de başlat
     threading.Thread(target=scheduler_thread, daemon=True).start()
 
-    # Flask web server (Render'ın verdiği PORT'u kullan!)
+    # Flask web server — Render PORT değişkenini kullan!
     port = int(os.environ.get("PORT", "10000"))
+    debug_print(f"🌐 Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
+
 
 if __name__ == "__main__":
     main()
-
-
