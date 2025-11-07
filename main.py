@@ -34,7 +34,7 @@ POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "72"))
 
 # Domain filtresini komple kapatmak için True yap (debug için)
-DISABLE_DOMAIN_FILTER = False
+DISABLE_DOMAIN_FILTER = True
 
 # Hata bildirimi için global durumlar
 LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
