@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Render için sade ve temiz versiyon
+Tera News Watcher — Render sürümü (sade + bakım özellikli)
 
-- Google News RSS'ten anahtar kelimelere göre haber çeker
-- Filtreler: tekrar, zaman, domain beyaz liste, Tera şirket eşleşmesi
+- Google News RSS'ten TERA ile ilgili haber çeker
+- Filtreler: tekrar, zaman, domain beyaz liste, şirket ismi eşleşmesi
 - Yeni haberleri Telegram kanalına yollar
-- /health ve /test endpointleri ile kontrol/test
+- /health ve /test endpointleri ile kontrol ve test
 """
 
 import os
@@ -30,21 +30,26 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # Haber tarama periyodu (dakika)
 POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
-# "Eski haber" eşiği (UTC; son 24 saat)
+# "Eski haber" eşiği (UTC; son X saat)
 MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "24"))
-START_TIME = datetime.utcnow() - timedelta(hours=MAX_AGE_HOURS)
+
+# Hata bildirimi aralığı (dakika)
+ERROR_COOLDOWN_MIN = int(os.getenv("ERROR_COOLDOWN_MIN", "30"))
+
+# Fazladan debug log görmek istersen (0 bırak normal, 3 yaparsan ilk 3 haberi loglar)
+DEBUG_LOG_ITEMS = int(os.getenv("DEBUG_LOG_ITEMS", "0"))
 
 # Domain filtresini komple kapatmak için True yap (debug için)
 DISABLE_DOMAIN_FILTER = False
 
 # Hata bildirimi için global durumlar
-LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
-LAST_ERROR_TIME = None        # son hata bildirimi zamanı
-ERROR_COOLDOWN_MIN = 30       # aynı tür hatayı en az kaç dakika arayla Telegram'a gönderelim
+LAST_JOB_TIME   = None   # job() en son ne zaman başarıyla bitti
+LAST_ERROR_TIME = None   # son hata bildirimi zamanı
 
-# ----------------------------
+# =========================
 # Anahtar kelimeler
-# ----------------------------
+# =========================
+
 KEYWORDS = [
     "tera",
     "tehol",
@@ -54,12 +59,14 @@ KEYWORDS = [
     "tera şirketleri",
 ]
 
-# ----------------------------
+# =========================
 # Şirket isimleri (eşleşme için)
-# ----------------------------
+# =========================
+
 COMPANY_TOKENS = [
     # Finans
     "tera yatırım",
+    "tera yatırım menkul değerler",
     "tera bank",
     "tera finans faktoring",
     "tera portföy",
@@ -86,9 +93,10 @@ COMPANY_TOKENS = [
     "tera ly fonu",
 ]
 
-# ----------------------------
+# =========================
 # Domain beyaz liste
-# ----------------------------
+# =========================
+
 ALLOWED_DOMAINS = [
     # Büyük haber portalları
     "hurriyet.com.tr",
@@ -125,12 +133,12 @@ ALLOWED_DOMAINS = [
 ]
 
 # =========================
-# Dosyalar
+# Dosya ayarları
 # =========================
 
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
-MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (çok fazlası gereksiz)
+MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (fazlasını atar)
 
 
 # =========================
@@ -138,7 +146,7 @@ MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (çok fazlası gereksiz)
 # =========================
 
 def debug_print(*args):
-    """Basit log helper."""
+    """Terminale log bas (flush=True)."""
     print(*args, flush=True)
 
 
@@ -161,13 +169,16 @@ def domain_allowed(link: str) -> bool:
 def matches_company(it: dict) -> bool:
     """Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?"""
     text = (it.get("title", "") + " " + it.get("desc", "")).lower()
-    # Her ihtimale karşı çekirdek bir anahtar kelime seti
-    base_keywords = ["tera", "tera yatırım", "barikat", "tra bilişim", "viva terra"]
+
+    # Çekirdek kelimeleri de ekle
+    base_keywords = ["tera", "tera yatırım", "tera yatırım menkul değerler", "barikat", "tra bilişim", "viva terra"]
     tokens = COMPANY_TOKENS + base_keywords
+
     return any(k in text for k in tokens)
 
 
 def send_telegram(text: str) -> None:
+    """Telegram'a mesaj gönder."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         debug_print("⚠️ TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID yok, mesaj gönderilmedi.")
         return
@@ -180,22 +191,20 @@ def send_telegram(text: str) -> None:
     except Exception as e:
         debug_print("Telegram hata:", e)
 
+
 def notify_error(message: str):
     """Hata durumunda hem log'a yaz, hem de Telegram'a makul sıklıkta uyarı gönder."""
     global LAST_ERROR_TIME
     now = datetime.utcnow()
 
-    # Eğer daha önce hiç hata göndermediysek veya cooldown süresi dolduysa
-    if LAST_ERROR_TIME is None or (now - LAST_ERROR_TIME).total_seconds() > ERROR_COOLDOWN_MIN * 60:
-        try:
+    try:
+        if LAST_ERROR_TIME is None or (now - LAST_ERROR_TIME).total_seconds() > ERROR_COOLDOWN_MIN * 60:
             send_telegram(f"⚠️ Hata uyarısı:\n{message}")
             LAST_ERROR_TIME = now
-        except Exception as e:
-            # Telegram da patlarsa en azından log'a düşsün
-            print("notify_error içinde hata:", e)
+    except Exception as e:
+        debug_print("notify_error içinde hata:", e)
 
-    # Konsola her zaman yaz
-    print("ERROR:", message)
+    debug_print("ERROR:", message)
 
 
 def google_news_rss(query: str) -> str:
@@ -211,6 +220,7 @@ def parse_rss(xml_text: str):
     """RSS'i parse edip {id,title,link,pub,pub_dt,desc} listesi döndürür."""
     root = ET.fromstring(xml_text)
     items = []
+
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
         link  = (it.findtext("link") or "").strip()
@@ -238,6 +248,7 @@ def parse_rss(xml_text: str):
                 "desc": desc,
             }
         )
+
     return items
 
 
@@ -249,14 +260,12 @@ def load_seen():
 
 
 def save_seen(seen: set):
-    # Set sırasız, ama çok büyürse rastgele bazı eski kayıtlar uçmuş olur — problem değil.
+    # Çok büyüdüyse kırp
     if len(seen) > MAX_SEEN_IDS:
-        # herhangi 50 bini tut, geri kalanı sil
         seen = set(list(seen)[:MAX_SEEN_IDS])
 
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(seen))
-
 
 
 def bootstrap():
@@ -266,6 +275,7 @@ def bootstrap():
     """
     seen = load_seen()
     added = 0
+
     for kw in KEYWORDS:
         try:
             xml = google_news_rss(kw)
@@ -279,6 +289,7 @@ def bootstrap():
     save_seen(seen)
     with open(INIT_FILE, "w", encoding="utf-8") as f:
         f.write(datetime.utcnow().isoformat())
+
     debug_print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
 
@@ -287,15 +298,24 @@ def bootstrap():
 # =========================
 
 def job():
+    """Ana tarama işi."""
     global LAST_JOB_TIME
 
     seen = load_seen()
-    new = []
+    new_items = []
+
+    # Zaman filtresi için eşik (her çalışmada yeniden hesapla!)
+    cutoff_time = datetime.utcnow() - timedelta(hours=MAX_AGE_HOURS)
 
     for kw in KEYWORDS:
         try:
             xml = google_news_rss(kw)
             items = parse_rss(xml)
+
+            if DEBUG_LOG_ITEMS > 0:
+                debug_print(f"--- {kw!r} için {len(items)} haber geldi.")
+                for it in items[:DEBUG_LOG_ITEMS]:
+                    debug_print("   •", it.get("title"), "|", urlparse(it.get("link", "")).netloc)
 
             for it in items:
                 # 1) tekrar kontrolü
@@ -303,7 +323,7 @@ def job():
                     continue
 
                 # 2) zaman filtresi
-                if it["pub_dt"] is not None and it["pub_dt"] < START_TIME:
+                if it["pub_dt"] is not None and it["pub_dt"] < cutoff_time:
                     continue
 
                 # 3) domain filtresi
@@ -314,32 +334,30 @@ def job():
                 if not matches_company(it):
                     continue
 
-                new.append((kw, it))
+                new_items.append((kw, it))
                 seen.add(it["id"])
 
         except Exception as e:
-            # Burada artık sadece print değil, Telegram uyarısı da var
             notify_error(f"{kw!r} kelimesi taranırken hata oluştu: {e}")
 
     # Buraya kadar geldiysek job() başarıyla bitti sayıyoruz
     LAST_JOB_TIME = datetime.utcnow()
 
-    if new:
-        for kw, it in new:
+    if new_items:
+        for kw, it in new_items:
             msg = (
                 f"📰 <b>{kw.upper()}</b>\n"
                 f"{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
             )
             send_telegram(msg)
         save_seen(seen)
-        print(LAST_JOB_TIME, "-", len(new), "haber gönderildi.")
+        debug_print(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
     else:
-        print(LAST_JOB_TIME, "- Yeni haber yok.")
+        debug_print(LAST_JOB_TIME, "- Yeni haber yok.")
 
 
 def scheduler_thread():
     """Schedule döngüsünü ayrı bir thread'de çalıştır."""
-    # İlk seferde bootstrap
     if not os.path.exists(INIT_FILE):
         bootstrap()
 
@@ -400,7 +418,7 @@ def main():
     # Haber tarama işini ayrı thread'de başlat
     threading.Thread(target=scheduler_thread, daemon=True).start()
 
-    # Flask web server — Render PORT değişkenini kullan!
+    # Flask web server — Render PORT değişkenini kullan
     port = int(os.environ.get("PORT", "10000"))
     debug_print(f"🌐 Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
