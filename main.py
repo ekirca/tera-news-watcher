@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Debug Sürümü (Render için)
+Tera News Watcher — Render için sade ve temiz versiyon
 
-Bu sürümde:
-- Domain filtresi geçici olarak kapalı (DISABLE_DOMAIN_FILTER = True).
-- Eski haber eşiği 72 saat.
-- Filtrelerin neden haberleri elediğini log’da görebilmen için ekstra debug çıktı var.
+- Google News RSS'ten anahtar kelimelere göre haber çeker
+- Filtreler: tekrar, zaman, domain beyaz liste, Tera şirket eşleşmesi
+- Yeni haberleri Telegram kanalına yollar
+- /health ve /test endpointleri ile kontrol / test
 """
 
 import os
@@ -25,17 +25,16 @@ import schedule
 # =========================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 # Haber tarama periyodu (dakika)
-POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
+POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
-# "Eski haber" eşiği (UTC; varsayılan 72 saat = 3 gün)
+# "Eski haber" eşiği (UTC; varsayılan: son 72 saat)
 MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "72"))
 
-# DEBUG: domain filtresini kapatmak için True
-# (haberler düzgün gelmeye başladığında bunu tekrar False yapabiliriz)
-DISABLE_DOMAIN_FILTER = True
+# Domain filtresini komple kapatmak için True yap (debug için)
+DISABLE_DOMAIN_FILTER = False
 
 # Hata bildirimi için global durumlar
 LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
@@ -43,24 +42,30 @@ LAST_ERROR_TIME = None        # son hata bildirimi zamanı
 ERROR_COOLDOWN_MIN = 30       # aynı tür hatayı en az kaç dakika arayla Telegram'a gönderelim
 
 # ----------------------------
-# Anahtar kelimeler (Google News araması için)
+# Anahtar kelimeler (Google News araması)
 # ----------------------------
 KEYWORDS = [
     "tera",
+    "tera yatırım",
+    "tera yatirim",
     "tehol",
     "trhol",
     "tly",
-    "tera yatırım",
     "tera şirketleri",
 ]
 
 # ----------------------------
 # Şirket isimleri (eşleşme için)
 # ----------------------------
-
 COMPANY_TOKENS = [
-    # Finans
+    # Holding / ana şirket
     "tera yatırım",
+    "tera yatırım menkul değerler",
+    "tera yatırım menkul degerler",
+    "tera yatırım menkul değerler a.ş",
+    "tera yatırım menkul degerler a.s",
+
+    # Finans
     "tera bank",
     "tera finans faktoring",
     "tera portföy",
@@ -73,6 +78,7 @@ COMPANY_TOKENS = [
     "barikat grup",
     "barikat",
     "tra bilişim",
+    "tra bilisim",
 
     # Tarım / Su
     "viva terra hayvancılık",
@@ -81,26 +87,29 @@ COMPANY_TOKENS = [
     # Hizmet
     "tera özel güvenlik",
 
-    # Fon
+    # Fon / ürün
     "tly fonu",
     "tera ly",
     "tera ly fonu",
 ]
 
-# Çekirdek anahtar kelimeler (kısaltmalar dahil)
+# Şirket eşleşmesini biraz daha agresif yapmak için çekirdek anahtarlar
 BASE_KEYWORDS = [
     "tera",
+    "tera yatirim",
     "tera yatırım",
-    "tera tra",
-    "tly",
-    "tehol",
-    "trhol",
+    "tera yatırım menkul",
+    "tera yatırım menkul değerler",
+    "tera yatırım teknoloji holding",
+    "tera finansal yatırımlar holding",
     "barikat",
+    "tra bilisim",
     "tra bilişim",
+    "viva terra",
 ]
 
 # ----------------------------
-# Domain beyaz liste (şimdilik debug için kapalı)
+# Domain beyaz liste
 # ----------------------------
 ALLOWED_DOMAINS = [
     # Büyük haber portalları
@@ -135,9 +144,6 @@ ALLOWED_DOMAINS = [
     # Resmi / kurumsal
     "kap.org.tr",
     "kamuyuaydinlatma.com",
-    # Google News yönlendirmeleri
-    "news.google.com",
-    "google.com",
 ]
 
 # =========================
@@ -148,19 +154,31 @@ SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
 MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (çok fazlası gereksiz)
 
+
 # =========================
 # Yardımcı fonksiyonlar
 # =========================
 
 def debug_print(*args):
-    """Basit log helper (Render loglarında görmek için)."""
+    """Basit log helper (anında flush)."""
     print(*args, flush=True)
+
+
+def normalize_text(txt: str) -> str:
+    """
+    Türkçe karakterleri sadeleştirip küçük harfe çevirir.
+    Böylece 'yatırım / yatirim / YATIRIM' hepsi aynı hale gelir.
+    """
+    table = str.maketrans(
+        "ÇçĞğİIıÖöŞşÜü",
+        "ccggiiioossuu"
+    )
+    return txt.translate(table).lower()
 
 
 def domain_allowed(link: str) -> bool:
     """Link'in domaini beyaz listedeyse True döndürür."""
     if DISABLE_DOMAIN_FILTER:
-        # Debug modunda her domain'e izin ver
         return True
     try:
         netloc = urlparse(link).netloc.lower()
@@ -175,9 +193,14 @@ def domain_allowed(link: str) -> bool:
 
 
 def matches_company(it: dict) -> bool:
-    """Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?"""
-    text = (it.get("title", "") + " " + it.get("desc", "")).lower()
-    tokens = COMPANY_TOKENS + BASE_KEYWORDS
+    """
+    Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?
+    Türkçe karakterler normalize edilerek karşılaştırılır.
+    """
+    text = normalize_text((it.get("title", "") + " " + it.get("desc", "")))
+
+    tokens = [normalize_text(k) for k in (COMPANY_TOKENS + BASE_KEYWORDS)]
+
     return any(k in text for k in tokens)
 
 
@@ -225,10 +248,10 @@ def parse_rss(xml_text: str):
     items = []
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
-        link  = (it.findtext("link") or "").strip()
-        guid  = (it.findtext("guid") or link or title).strip()
-        pub   = (it.findtext("pubDate") or "").strip()
-        desc  = (it.findtext("description") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        guid = (it.findtext("guid") or link or title).strip()
+        pub = (it.findtext("pubDate") or "").strip()
+        desc = (it.findtext("description") or "").strip()
 
         pub_dt = None
         if pub:
@@ -261,6 +284,7 @@ def load_seen():
 
 
 def save_seen(seen: set):
+    # Set sırasız, ama çok büyürse rastgele bazı eski kayıtlar uçmuş olur — problem değil.
     if len(seen) > MAX_SEEN_IDS:
         seen = set(list(seen)[:MAX_SEEN_IDS])
 
@@ -275,14 +299,11 @@ def bootstrap():
     """
     seen = load_seen()
     added = 0
-    debug_print("Bootstrap başlıyor, mevcut seen sayısı:", len(seen))
-
     for kw in KEYWORDS:
         try:
+            debug_print(f"[bootstrap] {kw!r} için Google News RSS çekiliyor...")
             xml = google_news_rss(kw)
-            items = parse_rss(xml)
-            debug_print(f"[BOOT][{kw}] {len(items)} haber bulundu.")
-            for it in items:
+            for it in parse_rss(xml):
                 if it["id"] not in seen:
                     seen.add(it["id"])
                     added += 1
@@ -292,7 +313,6 @@ def bootstrap():
     save_seen(seen)
     with open(INIT_FILE, "w", encoding="utf-8") as f:
         f.write(datetime.utcnow().isoformat())
-
     debug_print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
 
@@ -305,50 +325,45 @@ def job():
 
     now = datetime.utcnow()
     cutoff_time = now - timedelta(hours=MAX_AGE_HOURS)
+
     debug_print("===== JOB BAŞLANGIÇ =====", now.isoformat(), "cutoff_time:", cutoff_time.isoformat())
 
     seen = load_seen()
     debug_print("load_seen:", len(seen), "adet id")
 
     new = []
-    checked_total = 0
 
     for kw in KEYWORDS:
         try:
             debug_print(f"[{kw}] Google News RSS çekiliyor...")
             xml = google_news_rss(kw)
             items = parse_rss(xml)
-            debug_print(f"[{kw}] RSS item sayısı: {len(items)}")
+            debug_print(f"[{kw}] RSS item sayısı:", len(items))
 
             for it in items:
-                checked_total += 1
-                title = it["title"]
-                link = it["link"]
-                pub_dt = it["pub_dt"]
+                title = it.get("title", "").strip()
+                link = it.get("link", "").strip()
 
                 # 1) tekrar kontrolü
                 if it["id"] in seen:
-                    # debug_print(f"[SKIP][{kw}] Daha önce görüldü: {title}")
                     continue
 
                 # 2) zaman filtresi
-                if pub_dt is not None and pub_dt < cutoff_time:
-                    # debug_print(f"[SKIP][{kw}] Eski haber ({pub_dt}): {title}")
+                if it["pub_dt"] is not None and it["pub_dt"] < cutoff_time:
+                    # debug_print(f"[SKIP][{kw}] Eski haber:", title)
                     continue
 
                 # 3) domain filtresi
                 if not domain_allowed(link):
-                    debug_print(f"[SKIP][{kw}] Domain izinli değil: {link}")
+                    # debug_print(f"[SKIP][{kw}] Domain izinli değil: {link}")
                     continue
 
                 # 4) şirket eşleşmesi
                 if not matches_company(it):
-                    # Debug için ilk birkaçı yazalım
                     debug_print(f"[SKIP][{kw}] Şirket eşleşmedi: {title}")
                     continue
 
-                # Buraya geldiyse gerçekten ilgilenilen yeni bir haber
-                debug_print(f"[NEW][{kw}] {title} | {link}")
+                # Buraya gelmişse gerçekten TERA ile ilgili yeni haber
                 new.append((kw, it))
                 seen.add(it["id"])
 
@@ -358,7 +373,6 @@ def job():
     LAST_JOB_TIME = datetime.utcnow()
 
     if new:
-        debug_print("TOPLAM yeni haber sayısı:", len(new))
         for kw, it in new:
             msg = (
                 f"📰 <b>{kw.upper()}</b>\n"
@@ -368,13 +382,13 @@ def job():
         save_seen(seen)
         debug_print(LAST_JOB_TIME, "-", len(new), "haber gönderildi.")
     else:
-        debug_print(LAST_JOB_TIME, f"- Yeni haber yok. (Kontrol edilen toplam item: {checked_total})")
-
-    debug_print("===== JOB BİTİŞ =====")
+        debug_print(LAST_JOB_TIME, "- Yeni haber yok.")
+    debug_print("===== JOB BİTTİ =====")
 
 
 def scheduler_thread():
     """Schedule döngüsünü ayrı bir thread'de çalıştır."""
+    # İlk seferde bootstrap
     if not os.path.exists(INIT_FILE):
         bootstrap()
 
@@ -394,6 +408,7 @@ def scheduler_thread():
 # =========================
 
 app = Flask(__name__)
+
 
 @app.get("/")
 def home():
