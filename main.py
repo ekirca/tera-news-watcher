@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Render sürümü (sade + bakım özellikli)
+Tera News Watcher — Debug Sürümü (Render için)
 
-- Google News RSS'ten TERA ile ilgili haber çeker
-- Filtreler: tekrar, zaman, domain beyaz liste, şirket ismi eşleşmesi
-- Yeni haberleri Telegram kanalına yollar
-- /health ve /test endpointleri ile kontrol ve test
+Bu sürümde:
+- Domain filtresi geçici olarak kapalı (DISABLE_DOMAIN_FILTER = True).
+- Eski haber eşiği 72 saat.
+- Filtrelerin neden haberleri elediğini log’da görebilmen için ekstra debug çıktı var.
 """
 
 import os
@@ -30,26 +30,21 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # Haber tarama periyodu (dakika)
 POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 
-# "Eski haber" eşiği (UTC; son X saat)
-MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "24"))
+# "Eski haber" eşiği (UTC; varsayılan 72 saat = 3 gün)
+MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "72"))
 
-# Hata bildirimi aralığı (dakika)
-ERROR_COOLDOWN_MIN = int(os.getenv("ERROR_COOLDOWN_MIN", "30"))
-
-# Fazladan debug log görmek istersen (0 bırak normal, 3 yaparsan ilk 3 haberi loglar)
-DEBUG_LOG_ITEMS = int(os.getenv("DEBUG_LOG_ITEMS", "0"))
-
-# Domain filtresini komple kapatmak için True yap (debug için)
+# DEBUG: domain filtresini kapatmak için True
+# (haberler düzgün gelmeye başladığında bunu tekrar False yapabiliriz)
 DISABLE_DOMAIN_FILTER = True
 
 # Hata bildirimi için global durumlar
-LAST_JOB_TIME   = None   # job() en son ne zaman başarıyla bitti
-LAST_ERROR_TIME = None   # son hata bildirimi zamanı
+LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
+LAST_ERROR_TIME = None        # son hata bildirimi zamanı
+ERROR_COOLDOWN_MIN = 30       # aynı tür hatayı en az kaç dakika arayla Telegram'a gönderelim
 
-# =========================
-# Anahtar kelimeler
-# =========================
-
+# ----------------------------
+# Anahtar kelimeler (Google News araması için)
+# ----------------------------
 KEYWORDS = [
     "tera",
     "tehol",
@@ -59,14 +54,13 @@ KEYWORDS = [
     "tera şirketleri",
 ]
 
-# =========================
+# ----------------------------
 # Şirket isimleri (eşleşme için)
-# =========================
+# ----------------------------
 
 COMPANY_TOKENS = [
     # Finans
     "tera yatırım",
-    "tera yatırım menkul değerler",
     "tera bank",
     "tera finans faktoring",
     "tera portföy",
@@ -93,11 +87,21 @@ COMPANY_TOKENS = [
     "tera ly fonu",
 ]
 
+# Çekirdek anahtar kelimeler (kısaltmalar dahil)
+BASE_KEYWORDS = [
+    "tera",
+    "tera yatırım",
+    "tera tra",
+    "tly",
+    "tehol",
+    "trhol",
+    "barikat",
+    "tra bilişim",
+]
 
-# =========================
-# Domain beyaz liste
-# =========================
-
+# ----------------------------
+# Domain beyaz liste (şimdilik debug için kapalı)
+# ----------------------------
 ALLOWED_DOMAINS = [
     # Büyük haber portalları
     "hurriyet.com.tr",
@@ -131,29 +135,32 @@ ALLOWED_DOMAINS = [
     # Resmi / kurumsal
     "kap.org.tr",
     "kamuyuaydinlatma.com",
+    # Google News yönlendirmeleri
+    "news.google.com",
+    "google.com",
 ]
 
 # =========================
-# Dosya ayarları
+# Dosyalar
 # =========================
 
 SEEN_FILE = "seen_ids.txt"
 INIT_FILE = ".initialized"
-MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (fazlasını atar)
-
+MAX_SEEN_IDS = 50000  # 50 bin id'den fazlasını tutma (çok fazlası gereksiz)
 
 # =========================
 # Yardımcı fonksiyonlar
 # =========================
 
 def debug_print(*args):
-    """Terminale log bas (flush=True)."""
+    """Basit log helper (Render loglarında görmek için)."""
     print(*args, flush=True)
 
 
 def domain_allowed(link: str) -> bool:
     """Link'in domaini beyaz listedeyse True döndürür."""
     if DISABLE_DOMAIN_FILTER:
+        # Debug modunda her domain'e izin ver
         return True
     try:
         netloc = urlparse(link).netloc.lower()
@@ -170,18 +177,11 @@ def domain_allowed(link: str) -> bool:
 def matches_company(it: dict) -> bool:
     """Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?"""
     text = (it.get("title", "") + " " + it.get("desc", "")).lower()
-    base_keywords = ["tera", "tera yatırım", "tera tra", "tly", "tehol", "trhol", "barikat", "tra bilişim"]
-
-
-    # Çekirdek kelimeleri de ekle
-    base_keywords = ["tera", "tera yatırım", "tera yatırım menkul değerler", "barikat", "tra bilişim", "viva terra"]
-    tokens = COMPANY_TOKENS + base_keywords
-
+    tokens = COMPANY_TOKENS + BASE_KEYWORDS
     return any(k in text for k in tokens)
 
 
 def send_telegram(text: str) -> None:
-    """Telegram'a mesaj gönder."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         debug_print("⚠️ TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID yok, mesaj gönderilmedi.")
         return
@@ -200,14 +200,14 @@ def notify_error(message: str):
     global LAST_ERROR_TIME
     now = datetime.utcnow()
 
-    try:
-        if LAST_ERROR_TIME is None or (now - LAST_ERROR_TIME).total_seconds() > ERROR_COOLDOWN_MIN * 60:
+    if LAST_ERROR_TIME is None or (now - LAST_ERROR_TIME).total_seconds() > ERROR_COOLDOWN_MIN * 60:
+        try:
             send_telegram(f"⚠️ Hata uyarısı:\n{message}")
             LAST_ERROR_TIME = now
-    except Exception as e:
-        debug_print("notify_error içinde hata:", e)
+        except Exception as e:
+            print("notify_error içinde hata:", e)
 
-    debug_print("ERROR:", message)
+    print("ERROR:", message)
 
 
 def google_news_rss(query: str) -> str:
@@ -223,7 +223,6 @@ def parse_rss(xml_text: str):
     """RSS'i parse edip {id,title,link,pub,pub_dt,desc} listesi döndürür."""
     root = ET.fromstring(xml_text)
     items = []
-
     for it in root.findall(".//item"):
         title = (it.findtext("title") or "").strip()
         link  = (it.findtext("link") or "").strip()
@@ -251,7 +250,6 @@ def parse_rss(xml_text: str):
                 "desc": desc,
             }
         )
-
     return items
 
 
@@ -263,7 +261,6 @@ def load_seen():
 
 
 def save_seen(seen: set):
-    # Çok büyüdüyse kırp
     if len(seen) > MAX_SEEN_IDS:
         seen = set(list(seen)[:MAX_SEEN_IDS])
 
@@ -278,11 +275,14 @@ def bootstrap():
     """
     seen = load_seen()
     added = 0
+    debug_print("Bootstrap başlıyor, mevcut seen sayısı:", len(seen))
 
     for kw in KEYWORDS:
         try:
             xml = google_news_rss(kw)
-            for it in parse_rss(xml):
+            items = parse_rss(xml)
+            debug_print(f"[BOOT][{kw}] {len(items)} haber bulundu.")
+            for it in items:
                 if it["id"] not in seen:
                     seen.add(it["id"])
                     added += 1
@@ -301,62 +301,76 @@ def bootstrap():
 # =========================
 
 def job():
-    """Ana tarama işi."""
     global LAST_JOB_TIME
 
-    seen = load_seen()
-    new_items = []
+    now = datetime.utcnow()
+    cutoff_time = now - timedelta(hours=MAX_AGE_HOURS)
+    debug_print("===== JOB BAŞLANGIÇ =====", now.isoformat(), "cutoff_time:", cutoff_time.isoformat())
 
-    # Zaman filtresi için eşik (her çalışmada yeniden hesapla!)
-    cutoff_time = datetime.utcnow() - timedelta(hours=72)
+    seen = load_seen()
+    debug_print("load_seen:", len(seen), "adet id")
+
+    new = []
+    checked_total = 0
 
     for kw in KEYWORDS:
         try:
+            debug_print(f"[{kw}] Google News RSS çekiliyor...")
             xml = google_news_rss(kw)
             items = parse_rss(xml)
-
-            if DEBUG_LOG_ITEMS > 0:
-                debug_print(f"--- {kw!r} için {len(items)} haber geldi.")
-                for it in items[:DEBUG_LOG_ITEMS]:
-                    debug_print("   •", it.get("title"), "|", urlparse(it.get("link", "")).netloc)
+            debug_print(f"[{kw}] RSS item sayısı: {len(items)}")
 
             for it in items:
+                checked_total += 1
+                title = it["title"]
+                link = it["link"]
+                pub_dt = it["pub_dt"]
+
                 # 1) tekrar kontrolü
                 if it["id"] in seen:
+                    # debug_print(f"[SKIP][{kw}] Daha önce görüldü: {title}")
                     continue
 
                 # 2) zaman filtresi
-                if it["pub_dt"] is not None and it["pub_dt"] < cutoff_time:
+                if pub_dt is not None and pub_dt < cutoff_time:
+                    # debug_print(f"[SKIP][{kw}] Eski haber ({pub_dt}): {title}")
                     continue
 
                 # 3) domain filtresi
-                if not domain_allowed(it["link"]):
+                if not domain_allowed(link):
+                    debug_print(f"[SKIP][{kw}] Domain izinli değil: {link}")
                     continue
 
                 # 4) şirket eşleşmesi
                 if not matches_company(it):
+                    # Debug için ilk birkaçı yazalım
+                    debug_print(f"[SKIP][{kw}] Şirket eşleşmedi: {title}")
                     continue
 
-                new_items.append((kw, it))
+                # Buraya geldiyse gerçekten ilgilenilen yeni bir haber
+                debug_print(f"[NEW][{kw}] {title} | {link}")
+                new.append((kw, it))
                 seen.add(it["id"])
 
         except Exception as e:
             notify_error(f"{kw!r} kelimesi taranırken hata oluştu: {e}")
 
-    # Buraya kadar geldiysek job() başarıyla bitti sayıyoruz
     LAST_JOB_TIME = datetime.utcnow()
 
-    if new_items:
-        for kw, it in new_items:
+    if new:
+        debug_print("TOPLAM yeni haber sayısı:", len(new))
+        for kw, it in new:
             msg = (
                 f"📰 <b>{kw.upper()}</b>\n"
                 f"{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
             )
             send_telegram(msg)
         save_seen(seen)
-        debug_print(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
+        debug_print(LAST_JOB_TIME, "-", len(new), "haber gönderildi.")
     else:
-        debug_print(LAST_JOB_TIME, "- Yeni haber yok.")
+        debug_print(LAST_JOB_TIME, f"- Yeni haber yok. (Kontrol edilen toplam item: {checked_total})")
+
+    debug_print("===== JOB BİTİŞ =====")
 
 
 def scheduler_thread():
