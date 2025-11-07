@@ -40,7 +40,7 @@ ERROR_COOLDOWN_MIN = int(os.getenv("ERROR_COOLDOWN_MIN", "30"))
 DEBUG_LOG_ITEMS = int(os.getenv("DEBUG_LOG_ITEMS", "0"))
 
 # Domain filtresini komple kapatmak için True yap (debug için)
-DISABLE_DOMAIN_FILTER = False
+DISABLE_DOMAIN_FILTER = True
 
 # Hata bildirimi için global durumlar
 LAST_JOB_TIME   = None   # job() en son ne zaman başarıyla bitti
@@ -92,6 +92,7 @@ COMPANY_TOKENS = [
     "tera ly",
     "tera ly fonu",
 ]
+
 
 # =========================
 # Domain beyaz liste
@@ -169,6 +170,8 @@ def domain_allowed(link: str) -> bool:
 def matches_company(it: dict) -> bool:
     """Başlık + açıklama içinde Tera ile ilişkili şirket adları var mı?"""
     text = (it.get("title", "") + " " + it.get("desc", "")).lower()
+    base_keywords = ["tera", "tera yatırım", "tera tra", "tly", "tehol", "trhol", "barikat", "tra bilişim"]
+
 
     # Çekirdek kelimeleri de ekle
     base_keywords = ["tera", "tera yatırım", "tera yatırım menkul değerler", "barikat", "tra bilişim", "viva terra"]
@@ -305,7 +308,7 @@ def job():
     new_items = []
 
     # Zaman filtresi için eşik (her çalışmada yeniden hesapla!)
-    cutoff_time = datetime.utcnow() - timedelta(hours=MAX_AGE_HOURS)
+    cutoff_time = datetime.utcnow() - timedelta(hours=72)
 
     for kw in KEYWORDS:
         try:
