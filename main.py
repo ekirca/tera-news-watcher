@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import schedule
 
 # =========================
@@ -440,6 +440,34 @@ def test_notification():
     message = "🧪 Test bildirimi: TERA test haberi bulundu!"
     send_telegram(message)
     return "Test bildirimi gönderildi (Telegram’a bak 👀)", 200
+
+@app.get("/restart")
+def restart():
+    """
+    Self-restart endpoint:
+    - Cron-job burayı çağırınca
+    - Uygulama 2 saniye sonra kendini kapatır
+    - Render otomatik olarak yeniden ayağa kaldırır
+    """
+
+    # İsteğe bağlı güvenlik: RESTART_TOKEN tanımlıysa, token=... ile gelmeyenleri reddet
+    env_token = os.getenv("RESTART_TOKEN", "").strip()
+    req_token = (request.args.get("token") or "").strip()
+
+    if env_token:
+        if req_token != env_token:
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+
+    debug_print("♻️ Self-restart istendi, 2 saniye içinde çıkış yapılacak...")
+
+    def _do_exit():
+        time.sleep(2)
+        debug_print("Self-restart: process sonlandırılıyor (Render yeniden başlatacak).")
+        os._exit(0)
+
+    threading.Thread(target=_do_exit, daemon=True).start()
+
+    return jsonify({"ok": True, "message": "restart scheduled"}), 200
 
 
 # =========================
