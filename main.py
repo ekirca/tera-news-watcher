@@ -198,6 +198,53 @@ def domain_allowed(link: str) -> bool:
     except Exception:
         return False
 
+def process_extra_sources(cutoff_time, seen):
+    """config.yaml’daki 'sources' listesinden gelen öğeleri işler.
+       - zaman filtresi (cutoff_time)
+       - domain filtresi
+       - tekrarı önleme (seen)
+       - Telegram’a gönderim
+    """
+    new_count = 0
+    try:
+        extras = gather_extra_sources()
+    except Exception as e:
+        notify_error(f"extra sources fetch error: {e}")
+        return 0
+
+    for it in extras:
+        title = (it.get("title") or "").strip()
+        url   = (it.get("url")   or "").strip()
+        pubts = it.get("published")  # epoch saniye (veya None)
+        src   = it.get("source") or "extra"
+
+        # ID: url + timestamp kombinasyonu
+        iid = f"{url}|{int(pubts or 0)}"
+        if iid in seen:
+            continue
+
+        # zaman filtresi
+        if pubts:
+            try:
+                dt = datetime.utcfromtimestamp(pubts)
+                if dt < cutoff_time:
+                    continue
+            except Exception:
+                pass  # tarih yoksa geç
+
+        # domain filtresi
+        if not domain_allowed(url):
+            continue
+
+        # Telegram
+        msg = f"🧩 <b>{src}</b>\n{title}\n{url}"
+        send_telegram(msg)
+
+        seen.add(iid)
+        new_count += 1
+
+    return new_count
+
 
 def matches_company(it: dict) -> bool:
     """
@@ -608,6 +655,46 @@ def gather_extra_sources():
                 weight=src.get("weight", 0),
             ))
     return items
+
+def job():
+    global LAST_JOB_TIME
+    now = datetime.utcnow()
+    cutoff_time = now - timedelta(hours=MAX_AGE_HOURS)
+
+    debug_print("===== JOB BAŞLANGIÇ =====", now.isoformat(), "cutoff_time:", cutoff_time.isoformat())
+    seen = load_seen()
+    new = []
+
+    # (1) Google News (anahtar kelime) taraması – sizde zaten var
+    for kw in KEYWORDS:
+        ...
+        # uygun haberleri new listesine ekleyip seen’e ekliyorsunuz
+        ...
+
+    # (2) Ek kaynaklar (config.yaml: google_news / x_user)
+    try:
+        extra_sent = process_extra_sources(cutoff_time, seen)
+    except Exception as e:
+        notify_error(f"extra item error: {e}")
+        extra_sent = 0
+
+    LAST_JOB_TIME = datetime.utcnow()
+
+    # (3) Anahtar kelime kısmından çıkanları gönderin
+    if new:
+        for kw, it in new:
+            msg = f"📰 <b>{kw.upper()}</b>\n{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
+            send_telegram(msg)
+
+    # (4) seen’i bir kere kaydedin
+    save_seen(seen)
+
+    sent_total = (len(new) if new else 0) + extra_sent
+    if sent_total > 0:
+        debug_print(LAST_JOB_TIME, "-", sent_total, "haber gönderildi.")
+    else:
+        debug_print(LAST_JOB_TIME, "- Yeni haber yok.")
+    debug_print("===== JOB BİTTİ =====")
 
 
 # =========================
