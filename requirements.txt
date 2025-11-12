@@ -2,3 +2,6 @@ requests
 schedule
 python-dotenv
 Flask
+feedparser
+requests
+PyYAML
