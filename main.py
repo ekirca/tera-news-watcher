@@ -316,6 +316,57 @@ def bootstrap():
     debug_print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
 
+# --- ADD: google news fetcher ---
+import time, urllib.parse, feedparser
+
+def fetch_google_news(query, lang="tr", region="TR", weight=0):
+    params = {"q": query, "hl": lang, "gl": region, "ceid": f"{region}:{lang}"}
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
+    feed = feedparser.parse(url)
+    items = []
+    for e in feed.entries:
+        ts = getattr(e, "published_parsed", None)
+        items.append({
+            "title": e.title,
+            "url": e.link,
+            "published": time.mktime(ts) if ts else None,
+            "source": "google_news",
+            "weight": int(weight),
+        })
+    return items
+
+
+# --- ADD: x/ nitter fetcher ---
+import requests, feedparser
+
+def nitter_to_x(url: str) -> str:
+    return url.replace("https://nitter.net/", "https://x.com/")
+
+def fetch_x_user(users, nitter_base="https://nitter.net", weight=0):
+    all_items = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for u in users:
+        rss = f"{nitter_base.rstrip('/')}/{u}/rss"
+        try:
+            r = requests.get(rss, timeout=12, headers=headers)
+            r.raise_for_status()
+        except Exception:
+            continue
+        feed = feedparser.parse(r.text)
+        for e in feed.entries:
+            ts = getattr(e, "published_parsed", None)
+            all_items.append({
+                "title": e.title,                # tweet metni
+                "url": nitter_to_x(e.link),      # x.com’a çevir
+                "published": time.mktime(ts) if ts else None,
+                "source": "x_user",
+                "weight": int(weight),
+                "meta": {"user": u},
+            })
+    return all_items
+
+
+
 # =========================
 # Ana iş — periyodik tarama
 # =========================
@@ -403,6 +454,39 @@ def scheduler_thread():
         time.sleep(1)
 
 
+# --- ADD: config.yaml oku ve kaynakları çalıştır ---
+import yaml, os
+from urllib.parse import urlparse
+
+def load_config():
+    try:
+        with open("config.yaml", "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+CFG = load_config()
+
+def gather_extra_sources():
+    items = []
+    for src in CFG.get("sources", []):
+        t = src.get("type")
+        if t == "google_news":
+            items.extend(fetch_google_news(
+                query=src.get("query", "TERA YATIRIM"),
+                lang=src.get("lang", "tr"),
+                region=src.get("region", "TR"),
+                weight=src.get("weight", 0),
+            ))
+        elif t == "x_user":
+            items.extend(fetch_x_user(
+                users=src.get("users", []),
+                nitter_base=src.get("nitter_base", "https://nitter.net"),
+                weight=src.get("weight", 0),
+            ))
+    return items
+
+
 # =========================
 # Flask (health / test)
 # =========================
@@ -468,6 +552,13 @@ def restart():
     threading.Thread(target=_do_exit, daemon=True).start()
 
     return jsonify({"ok": True, "message": "restart scheduled"}), 200
+
+
+news_items = []  # mevcut kaynakların
+# ... senin mevcut toplayıcıların ...
+
+# yeni kaynakları da ekle:
+news_items.extend(gather_extra_sources())
 
 
 # =========================
