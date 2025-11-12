@@ -33,7 +33,7 @@ POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))
 
 # Domain filtresini komple kapatmak istersen "true" yap
-DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "true"
+DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
 
 # Restart güvenliği (opsiyonel)
 RESTART_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
