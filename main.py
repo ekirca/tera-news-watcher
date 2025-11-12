@@ -13,6 +13,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus, urlparse
+import urllib
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
