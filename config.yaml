@@ -1,0 +1,41 @@
+domains_allow:
+  - kap.org.tr
+  - terayatirim.com
+  - terayatirim.com.tr
+  - bloomberght.com
+  - investing.com
+  - bigpara.com
+  - mynet.com
+  - paratic.com
+  - borsagundem.com
+  - x.com
+  - twitter.com
+  - nitter.net
+
+sources:
+  - type: google_news
+    query: "TERA YATIRIM OR TEHOL OR THOL"
+    lang: "tr"
+    region: "TR"
+    weight: 0
+
+  - type: google_news
+    # KAP + şirket sitesi odaklı
+    query: "(site:kap.org.tr OR site:terayatirim.com OR site:terayatirim.com.tr) (TERA OR TEHOL OR 'Tera Yatırım')"
+    lang: "tr"
+    region: "TR"
+    weight: 15
+
+  - type: x_user
+    users:
+      - "terayatirim"   # @terayatirim
+    nitter_base: "https://nitter.net"
+    weight: 10
+
+quiet_hours:
+  start: "23:00"
+  end: "07:00"
+
+thresholds:
+  instant: 70
+  batch: 50
