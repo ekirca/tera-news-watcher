@@ -455,6 +455,26 @@ def fetch_x_user(users, nitter_base="https://nitter.net", weight=0):
             })
     return all_items
 
+TRIM_SEEN_KEEP = int(os.getenv("TRIM_SEEN_KEEP", "20000"))  # en yeni kaç ID kalsın
+TRIM_RUN_HOUR  = os.getenv("TRIM_RUN_HOUR", "03:10")        # her gün şu saatte çalışsın (GMT+3'e göre)
+
+def trim_seen_file(keep: int = TRIM_SEEN_KEEP):
+    """seen_ids.txt'yi budar: en yeni KEEP satırı bırakır."""
+    try:
+        if not os.path.exists(SEEN_FILE):
+            return
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+        if len(lines) <= keep:
+            debug_print(f"[trim] Gerek yok (satır={len(lines)} <= keep={keep}).")
+            return
+        # En sondaki satırlar en yeni eklenenler olduğu için sondan KEEP kadarını al
+        new_lines = lines[-keep:]
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(new_lines))
+        debug_print(f"[trim] seen_ids.txt budandı: {len(lines)} -> {len(new_lines)}")
+    except Exception as e:
+        notify_error(f"seen_ids.txt budanırken hata: {e}")
 
 
 # =========================
@@ -553,6 +573,9 @@ def scheduler_thread():
         schedule.run_pending()
         time.sleep(1)
 
+    # Günlük budama (ör. 03:10)
+    schedule.every().day.at(TRIM_RUN_HOUR).do(trim_seen_file)
+
 
 # --- ADD: config.yaml oku ve kaynakları çalıştır ---
 import yaml, os
@@ -620,10 +643,16 @@ def health():
 
 @app.get("/test")
 def test_notification():
-    """Telegram'a test mesajı göndermek için basit endpoint."""
-    message = "🧪 Test bildirimi: TERA test haberi bulundu!"
-    send_telegram(message)
-    return "Test bildirimi gönderildi (Telegram’a bak 👀)", 200
+    """
+    /test?msg=...  -> Telegram'a serbest mesaj yollar.
+    parametre verilmezse varsayılan kısa test mesajı atar.
+    """
+    msg = request.args.get("msg", "").strip()
+    if not msg:
+        msg = "🧪 Test bildirimi: sistem çalışıyor."
+    send_telegram(msg)
+    return f"Test bildirimi gönderildi: {msg}", 200
+
 
 @app.get("/restart")
 def restart():
