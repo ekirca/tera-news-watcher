@@ -34,7 +34,7 @@ POLL_INTERVAL_MIN = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 MAX_AGE_HOURS = int(os.getenv("MAX_AGE_HOURS", "72"))
 
 # Domain filtresini komple kapatmak için True yap (debug için)
-DISABLE_DOMAIN_FILTER = True
+DISABLE_DOMAIN_FILTER = False
 
 # Hata bildirimi için global durumlar
 LAST_JOB_TIME = None          # job() en son ne zaman başarıyla bitti
@@ -140,6 +140,12 @@ ALLOWED_DOMAINS = [
     "finansgundem.com",
     "bigpara.hurriyet.com.tr",
     "tr.investing.com",
+    "terayatirim.com",
+    "terayatirim.com.tr",
+    "x.com",
+    "twitter.com",
+    "nitter.net",
+
 
     # Resmi / kurumsal
     "kap.org.tr",
@@ -292,6 +298,39 @@ def save_seen(seen: set):
         f.write("\n".join(seen))
 
 
+# --- SEEN dosyasını artımlı yazmak ve son MAX satırı tutmak için ---
+def save_seen_incremental(added_ids):
+    """Bu run'da bulunan yeni id'leri sona ekler, sonra dosyayı son MAX satıra kırpar."""
+    if not added_ids:
+        return
+
+    # 1) Sona ekle
+    with open(SEEN_FILE, "a", encoding="utf-8") as f:
+        for uid in added_ids:
+            f.write(uid + "\n")
+
+    # 2) Gerekirse dosyayı son MAX satıra kırp
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return
+
+    if len(lines) > MAX_SEEN_IDS:
+        # Sadece SON MAX_SEEN_IDS satırı tut (en tazeler)
+        keep = lines[-MAX_SEEN_IDS:]
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(keep))
+
+def save_seen_overwrite(seen_set):
+    """Bootstrap gibi 'tam yenileme' durumları için: sırayı umursamadan komple yazar."""
+    data = list(seen_set)
+    if len(data) > MAX_SEEN_IDS:
+        data = data[-MAX_SEEN_IDS:]  # burada sıra önemsiz; bootstrap'ta bildirim de atmıyoruz
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(data))
+
+
 def bootstrap():
     """
     İlk çalıştırmada mevcut haberlerin hepsini seen'e işaretler,
@@ -310,14 +349,64 @@ def bootstrap():
         except Exception as e:
             debug_print("Bootstrap hata:", kw, e)
 
-    save_seen(seen)
+    save_seen_overwrite(seen)
     with open(INIT_FILE, "w", encoding="utf-8") as f:
         f.write(datetime.utcnow().isoformat())
     debug_print(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi (bildirim yok).")
 
+    # --- EK KAYNAKLAR (config.yaml) ---
+    try:
+        extra = gather_extra_sources()
+    except Exception as e:
+        notify_error(f"extra sources error: {e}")
+        extra = []
+
+    for e in extra:
+        try:
+            title = (e.get("title") or "").strip()
+            link  = (e.get("url") or "").strip()
+            # ek kaynaklarda benzersiz id:
+            uid = f"{e.get('source','ext')}::{link or title}"
+
+            # tekrar kontrolü
+            if uid in seen:
+                continue
+
+            # zaman filtresi (milisaniye yoksa None gelebilir)
+            pub_ts = e.get("published")
+            pub_dt = datetime.utcfromtimestamp(pub_ts) if pub_ts else None
+            if pub_dt is not None and pub_dt < cutoff_time:
+                continue
+
+            # domain filtresi
+            if not domain_allowed(link):
+                continue
+
+            # şirket eşleşmesi
+            item = {"title": title, "desc": "", "link": link}
+            if not matches_company(item):
+                # X’te @terayatirim ise doğrudan kabul edelim (kurumsal hesap)
+                if not (e.get("source") == "x_user" and e.get("meta", {}).get("user") == "terayatirim"):
+                    continue
+
+            # gerçekten yeni & ilgili
+            new.append(("external", {
+                "id": uid,
+                "title": title,
+                "link": link,
+                "pub": "",
+                "pub_dt": pub_dt,
+                "desc": "",
+            }))
+            seen.add(uid)
+            added_ids.append(uid)
+        except Exception as ie:
+            notify_error(f"extra item error: {ie}")
+
+
 
 # --- ADD: google news fetcher ---
-import time, urllib.parse, feedparser
+urllib.parse, feedparser
 
 def fetch_google_news(query, lang="tr", region="TR", weight=0):
     params = {"q": query, "hl": lang, "gl": region, "ceid": f"{region}:{lang}"}
@@ -337,7 +426,7 @@ def fetch_google_news(query, lang="tr", region="TR", weight=0):
 
 
 # --- ADD: x/ nitter fetcher ---
-import requests, feedparser
+
 
 def nitter_to_x(url: str) -> str:
     return url.replace("https://nitter.net/", "https://x.com/")
@@ -384,6 +473,9 @@ def job():
 
     new = []
 
+    added_ids = []  # bu run'da ilk kez görülen id'ler
+
+    
     for kw in KEYWORDS:
         try:
             debug_print(f"[{kw}] Google News RSS çekiliyor...")
@@ -417,6 +509,13 @@ def job():
                 # Buraya gelmişse gerçekten TERA ile ilgili yeni haber
                 new.append((kw, it))
                 seen.add(it["id"])
+                added_ids.append(it["id"])   # <-- EKLEDİK
+
+
+                added_ids.append(it["id"])      # Google News tarafında
+                # ve external blokta:
+                added_ids.append(uid)           # x_user / extra kaynaklar tarafında
+
 
         except Exception as e:
             notify_error(f"{kw!r} kelimesi taranırken hata oluştu: {e}")
@@ -430,7 +529,7 @@ def job():
                 f"{it['title']}\n{it['link']}\n{it.get('pub') or ''}"
             )
             send_telegram(msg)
-        save_seen(seen)
+            save_seen_incremental(added_ids)
         debug_print(LAST_JOB_TIME, "-", len(new), "haber gönderildi.")
     else:
         debug_print(LAST_JOB_TIME, "- Yeni haber yok.")
@@ -554,11 +653,6 @@ def restart():
     return jsonify({"ok": True, "message": "restart scheduled"}), 200
 
 
-news_items = []  # mevcut kaynakların
-# ... senin mevcut toplayıcıların ...
-
-# yeni kaynakları da ekle:
-news_items.extend(gather_extra_sources())
 
 
 # =========================
