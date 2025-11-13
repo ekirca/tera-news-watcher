@@ -39,3 +39,7 @@ quiet_hours:
 thresholds:
   instant: 70
   batch: 50
+
+  runtime:
+  only_today: true
+
