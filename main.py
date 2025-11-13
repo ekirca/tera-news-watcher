@@ -32,6 +32,9 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))  # şu an kullanılmıyor ama dursun
 
+# Türkiye saati için UTC+3 (istersen .env'den değiştirebilirsin)
+TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
+
 # Domain filtresini komple kapatmak istersen "true" yap
 # (Not: önceki sürümle uyum için == "false" bırakıldı)
 DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
@@ -90,7 +93,6 @@ DEFAULT_ALLOWED_DOMAINS = [
     "ekoturk.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
     "t24.com.tr", "patronlardunyasi.com", "borsagundem.com.tr",
     "finansgundem.com", "bigpara.hurriyet.com.tr", "tr.investing.com",
-    "rotaborsa.com", "hisse.net",
     # resmi/kurumsal
     "kap.org.tr", "kamuyuaydinlatma.com",
 ]
@@ -316,9 +318,10 @@ def job():
     global LAST_JOB_TIME
 
     now_utc = datetime.now(timezone.utc)
-    today_utc = now_utc.date()  # sadece bugünün tarihi
+    local_time = now_utc + timedelta(hours=TZ_OFFSET_HOURS)  # Türkiye saati
+    today_utc = now_utc.date()  # haber tarih filtresi için
 
-    debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "today:", str(today_utc))
+    debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "local:", local_time.isoformat())
 
     seen_list, seen_set = load_seen()
     new_items = []
@@ -387,9 +390,18 @@ def job():
     else:
         debug(LAST_JOB_TIME, "- Yeni haber yok.")
 
-        # 🔔 Eğer yeni haber yoksa saatlik durum bildirimi gönder
-        today = now_utc.date().isoformat()
-        send_telegram(f"🟡 Bugün ({today}) TERA ile ilgili yeni haber yok.")
+        # 🔔 Hafta içi 08:00–18:00 arası, saat başı "haber yok" bildirimi
+        weekday = local_time.weekday()   # 0 = Pazartesi, 6 = Pazar
+        hour    = local_time.hour
+        minute  = local_time.minute
+
+        if (
+            0 <= weekday <= 4 and      # Pazartesi–Cuma
+            8 <= hour <= 18 and        # 08:00–18:00 arası
+            minute == 0                # sadece saat başı (08:00, 09:00, ... 18:00)
+        ):
+            today_local = local_time.date().isoformat()
+            send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
 
     debug("===== JOB BİTTİ =====")
 
