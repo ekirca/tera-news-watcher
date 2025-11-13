@@ -33,6 +33,7 @@ POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
 MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))
 
 # Domain filtresini komple kapatmak istersen "true" yap
+# (Not: Buradaki == "false" mantığı önceki sürümle aynı bırakıldı)
 DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
 
 # Restart güvenliği (opsiyonel)
@@ -202,7 +203,14 @@ def parse_rss(xml_text: str):
             except Exception:
                 pub_dt = None
 
-        items.append({"id": guid or link or title, "title": title, "link": link, "pub": pub, "pub_dt": pub_dt, "desc": desc})
+        items.append({
+            "id": guid or link or title,
+            "title": title,
+            "link": link,
+            "pub": pub,
+            "pub_dt": pub_dt,
+            "desc": desc,
+        })
     return items
 
 # =============== EXTRA SOURCES (config.yaml) ===============
@@ -303,9 +311,9 @@ def job():
     global LAST_JOB_TIME
 
     now_utc = datetime.now(timezone.utc)
-    cutoff_time = now_utc - timedelta(hours=MAX_AGE_HOURS)
+    today_utc = now_utc.date()  # sadece bugünün tarihi
 
-    debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "cutoff_time:", cutoff_time.isoformat())
+    debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "today:", str(today_utc))
 
     seen_list, seen_set = load_seen()
     new_items = []
@@ -320,8 +328,11 @@ def job():
             for it in items:
                 if it["id"] in seen_set:
                     continue
-                if it["pub_dt"] and it["pub_dt"] < cutoff_time:
+
+                # 🔹 SADECE BUGÜNÜN HABERLERİ
+                if it["pub_dt"] and it["pub_dt"].date() != today_utc:
                     continue
+
                 if not domain_allowed(it["link"]):
                     continue
                 if not matches_company(it):
@@ -338,8 +349,11 @@ def job():
             try:
                 if it["id"] in seen_set:
                     continue
-                if it.get("pub_dt") and it["pub_dt"] < cutoff_time:
+
+                # 🔹 SADECE BUGÜNÜN HABERLERİ
+                if it.get("pub_dt") and it["pub_dt"].date() != today_utc:
                     continue
+
                 if it.get("link") and not domain_allowed(it["link"]):
                     continue
                 # Extra kaynaklarda şirket eşleşmesini yine uygulayalım
