@@ -2,9 +2,9 @@
 """
 Tera News Watcher — Render temiz sürüm
 - Google News (RSS) + Opsiyonel extra kaynaklar (config.yaml)
-- Şirket eşleşmesi, domain beyaz liste, yaş filtresi, tekrar filtresi
+- Şirket eşleşmesi, domain beyaz liste, tarih filtresi, tekrar filtresi
 - Telegram gönderimi
-- /health, /test, /restart (cron için) endpoint'leri
+- /health, /test, /restart endpoint'leri
 """
 
 import os
@@ -30,10 +30,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
-MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))
+MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))  # şu an kullanılmıyor ama dursun
 
 # Domain filtresini komple kapatmak istersen "true" yap
-# (Not: Buradaki == "false" mantığı önceki sürümle aynı bırakıldı)
+# (Not: önceki sürümle uyum için == "false" bırakıldı)
 DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
 
 # Restart güvenliği (opsiyonel)
@@ -90,6 +90,7 @@ DEFAULT_ALLOWED_DOMAINS = [
     "ekoturk.com", "haberturk.com", "sozcu.com.tr", "sabah.com.tr",
     "t24.com.tr", "patronlardunyasi.com", "borsagundem.com.tr",
     "finansgundem.com", "bigpara.hurriyet.com.tr", "tr.investing.com",
+    "rotaborsa.com", "hisse.net",
     # resmi/kurumsal
     "kap.org.tr", "kamuyuaydinlatma.com",
 ]
@@ -121,7 +122,11 @@ def send_telegram(text: str):
         return
     try:
         u = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        r = requests.post(u, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode":"HTML"}, timeout=15)
+        r = requests.post(
+            u,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=15,
+        )
         debug("Telegram status:", r.status_code)
     except Exception as e:
         debug("Telegram error:", e)
@@ -136,13 +141,13 @@ def notify_error(msg: str):
 
 def load_config() -> dict:
     try:
-        with open("config.yaml","r",encoding="utf-8") as f:
+        with open("config.yaml", "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
 
 CFG = load_config()
-ALLOWED_DOMAINS = list(dict.fromkeys(DEFAULT_ALLOWED_DOMAINS + [  # uniq + preserve order
+ALLOWED_DOMAINS = list(dict.fromkeys(DEFAULT_ALLOWED_DOMAINS + [
     *(CFG.get("domains_allow") or [])
 ]))
 
@@ -224,8 +229,8 @@ def fetch_google_news_feed(query, lang="tr", region="TR", weight=0):
         published = datetime.fromtimestamp(time.mktime(ts), tz=timezone.utc) if ts else None
         out.append({
             "id": e.get("id") or e.get("link") or e.get("title"),
-            "title": e.get("title",""),
-            "link": e.get("link",""),
+            "title": e.get("title", ""),
+            "link": e.get("link", ""),
             "pub_dt": published,
             "desc": "",
             "weight": int(weight),
@@ -252,8 +257,8 @@ def fetch_x_user(users, nitter_base="https://nitter.net", weight=0):
             published = datetime.fromtimestamp(time.mktime(ts), tz=timezone.utc) if ts else None
             all_items.append({
                 "id": e.get("id") or e.get("link") or e.get("title"),
-                "title": e.get("title",""),
-                "link": nitter_to_x(e.get("link","")),
+                "title": e.get("title", ""),
+                "link": nitter_to_x(e.get("link", "")),
                 "pub_dt": published,
                 "desc": "",
                 "weight": int(weight),
@@ -267,16 +272,16 @@ def gather_extra_sources():
         t = src.get("type")
         if t == "google_news":
             items.extend(fetch_google_news_feed(
-                query = src.get("query","TERA YATIRIM"),
-                lang  = src.get("lang","tr"),
-                region= src.get("region","TR"),
-                weight= src.get("weight",0),
+                query  = src.get("query", "TERA YATIRIM"),
+                lang   = src.get("lang", "tr"),
+                region = src.get("region", "TR"),
+                weight = src.get("weight", 0),
             ))
         elif t == "x_user":
             items.extend(fetch_x_user(
-                users = src.get("users", []),
-                nitter_base = src.get("nitter_base","https://nitter.net"),
-                weight = src.get("weight",0),
+                users       = src.get("users", []),
+                nitter_base = src.get("nitter_base", "https://nitter.net"),
+                weight      = src.get("weight", 0),
             ))
     return items
 
@@ -359,7 +364,7 @@ def job():
                 # Extra kaynaklarda şirket eşleşmesini yine uygulayalım
                 if not matches_company(it):
                     continue
-                new_items.append((it.get("source","EXT"), "", it))
+                new_items.append((it.get("source", "EXT"), "", it))
                 seen_set.add(it["id"]); seen_list.append(it["id"])
             except Exception as ee:
                 notify_error(f"extra item error: {ee}")
@@ -375,10 +380,17 @@ def job():
             pub_str = it.get("pub") or (it.get("pub_dt").isoformat() if it.get("pub_dt") else "")
             msg = f"📰 <b>{head}</b>\n{it.get('title','')}\n{it.get('link','')}\n{pub_str}"
             send_telegram(msg)
+
         save_seen(seen_list)
         debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
+
     else:
         debug(LAST_JOB_TIME, "- Yeni haber yok.")
+
+        # 🔔 Eğer yeni haber yoksa saatlik durum bildirimi gönder
+        today = now_utc.date().isoformat()
+        send_telegram(f"🟡 Bugün ({today}) TERA ile ilgili yeni haber yok.")
+
     debug("===== JOB BİTTİ =====")
 
 def scheduler_thread():
@@ -417,8 +429,8 @@ def test_notification():
 @app.get("/restart")
 def restart():
     if RESTART_TOKEN:
-        if (request.args.get("token","").strip() != RESTART_TOKEN):
-            return jsonify({"ok": False, "error":"unauthorized"}), 403
+        if (request.args.get("token", "").strip() != RESTART_TOKEN):
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
 
     debug("♻️ Self-restart istendi; 2 sn sonra çıkılacak…")
     def _do_exit():
@@ -426,12 +438,12 @@ def restart():
         debug("Self-restart: process sonlandırılıyor.")
         os._exit(0)
     threading.Thread(target=_do_exit, daemon=True).start()
-    return jsonify({"ok": True, "message":"restart scheduled"}), 200
+    return jsonify({"ok": True, "message": "restart scheduled"}), 200
 
 # =============== Entry ===============
 def main():
     threading.Thread(target=scheduler_thread, daemon=True).start()
-    port = int(os.environ.get("PORT","10000"))
+    port = int(os.environ.get("PORT", "10000"))
     debug(f"🌐 Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
 
