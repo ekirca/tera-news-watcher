@@ -389,18 +389,16 @@ def job():
         save_seen(seen_list)
         debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
 
-    else:
+            else:
         debug(LAST_JOB_TIME, "- Yeni haber yok.")
 
-        # 🔔 Hafta içi 08:00–18:00 arası, saat başı "haber yok" bildirimi
+        # 🔔 Hafta içi 08:00–18:00 arası, her saat için en fazla 1 "haber yok" bildirimi
         weekday = local_time.weekday()   # 0 = Pazartesi, 6 = Pazar
         hour    = local_time.hour
-        minute  = local_time.minute
 
         if (
             0 <= weekday <= 4 and      # Pazartesi–Cuma
-            8 <= hour <= 18 and        # 08:00–18:00 arası
-            minute == 0                # sadece saat başı (08:00, 09:00, ... 18:00)
+            8 <= hour <= 18           # 08:00–18:00 arası
         ):
             today_local = local_time.date().isoformat()
             tag = f"{today_local}-{hour:02d}"
@@ -410,6 +408,7 @@ def job():
                 LAST_NO_NEWS_TAG = tag
             else:
                 debug("Bu saat için 'haber yok' mesajı zaten gönderilmiş, tekrar atlanıyor.")
+
 
     debug("===== JOB BİTTİ =====")
 
