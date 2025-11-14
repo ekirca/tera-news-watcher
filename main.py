@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Render temiz sürüm
+Tera News Watcher — Render temiz sürüm (self-keepalive'lı)
 - Google News (RSS) + Opsiyonel extra kaynaklar (config.yaml)
 - Şirket eşleşmesi, domain beyaz liste, tarih filtresi, tekrar filtresi
 - Telegram gönderimi
 - /health, /test, /restart endpoint'leri
+- İçeriden kendi kendine /health ping atarak Render'ı uyanık tutar
 """
 
 import os
@@ -36,10 +37,14 @@ MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))  # şu an kullanılm�
 TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
 # Domain filtresini komple kapatmak istersen "true" yap
-DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "true"
+# Not: eski sürümle uyum için logic aynı bırakıldı
+DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
 
 # Restart güvenliği (opsiyonel)
 RESTART_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
+
+# Kendi kendine ping için
+KEEPALIVE_URL = os.getenv("KEEPALIVE_URL", "").strip()
 
 # =========================
 # Dosyalar
@@ -99,12 +104,10 @@ DEFAULT_ALLOWED_DOMAINS = [
 # =========================
 # Global durum / yardımcılar
 # =========================
-LAST_JOB_TIME  = None
-LAST_ERROR_TIME = None
+LAST_JOB_TIME    = None
+LAST_ERROR_TIME  = None
+LAST_NO_NEWS_TAG = None   # "2025-11-14-15" gibi
 ERROR_COOLDOWN_MIN = 30
-
-# Aynı saat içinde birden fazla "haber yok" mesajı göndermemek için
-LAST_NO_NEWS_TAG = None  # "YYYY-MM-DD-HH" formatında tutulacak
 
 app = Flask(__name__)
 
@@ -315,6 +318,16 @@ def bootstrap():
         f.write(datetime.now(timezone.utc).isoformat())
     debug(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi.")
 
+# =============== KEEPALIVE (Render'ı uyutmama) ===============
+def self_ping():
+    if not KEEPALIVE_URL:
+        return
+    try:
+        r = requests.get(KEEPALIVE_URL, timeout=10)
+        debug(f"[KEEPALIVE] {KEEPALIVE_URL} -> {r.status_code}")
+    except Exception as e:
+        debug(f"[KEEPALIVE] hata: {e}")
+
 # =============== İş (job) ===============
 def job():
     global LAST_JOB_TIME, LAST_NO_NEWS_TAG
@@ -389,17 +402,14 @@ def job():
         save_seen(seen_list)
         debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
 
-            else:
+    else:
         debug(LAST_JOB_TIME, "- Yeni haber yok.")
 
-        # 🔔 Hafta içi 08:00–18:00 arası, her saat için en fazla 1 "haber yok" bildirimi
+        # 🔔 Hafta içi 08:00–18:00 arası, her saat için EN FAZLA 1 "haber yok" bildirimi
         weekday = local_time.weekday()   # 0 = Pazartesi, 6 = Pazar
         hour    = local_time.hour
 
-        if (
-            0 <= weekday <= 4 and      # Pazartesi–Cuma
-            8 <= hour <= 18           # 08:00–18:00 arası
-        ):
+        if 0 <= weekday <= 4 and 8 <= hour <= 18:
             today_local = local_time.date().isoformat()
             tag = f"{today_local}-{hour:02d}"
 
@@ -409,7 +419,6 @@ def job():
             else:
                 debug("Bu saat için 'haber yok' mesajı zaten gönderilmiş, tekrar atlanıyor.")
 
-
     debug("===== JOB BİTTİ =====")
 
 def scheduler_thread():
@@ -418,8 +427,14 @@ def scheduler_thread():
 
     # hemen bir kez çalıştır
     job()
+
     # sonra periyodik
     schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
+
+    # kendi kendine Render'ı uyanık tut
+    if KEEPALIVE_URL:
+        schedule.every(5).minutes.do(self_ping)
+
     while True:
         schedule.run_pending()
         time.sleep(1)
