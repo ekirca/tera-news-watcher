@@ -36,8 +36,7 @@ MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))  # şu an kullanılm�
 TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
 # Domain filtresini komple kapatmak istersen "true" yap
-# (Not: önceki sürümle uyum için == "false" bırakıldı)
-DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
+DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "true"
 
 # Restart güvenliği (opsiyonel)
 RESTART_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
@@ -103,6 +102,9 @@ DEFAULT_ALLOWED_DOMAINS = [
 LAST_JOB_TIME  = None
 LAST_ERROR_TIME = None
 ERROR_COOLDOWN_MIN = 30
+
+# Aynı saat içinde birden fazla "haber yok" mesajı göndermemek için
+LAST_NO_NEWS_TAG = None  # "YYYY-MM-DD-HH" formatında tutulacak
 
 app = Flask(__name__)
 
@@ -315,7 +317,7 @@ def bootstrap():
 
 # =============== İş (job) ===============
 def job():
-    global LAST_JOB_TIME
+    global LAST_JOB_TIME, LAST_NO_NEWS_TAG
 
     now_utc = datetime.now(timezone.utc)
     local_time = now_utc + timedelta(hours=TZ_OFFSET_HOURS)  # Türkiye saati
@@ -401,7 +403,13 @@ def job():
             minute == 0                # sadece saat başı (08:00, 09:00, ... 18:00)
         ):
             today_local = local_time.date().isoformat()
-            send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
+            tag = f"{today_local}-{hour:02d}"
+
+            if tag != LAST_NO_NEWS_TAG:
+                send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
+                LAST_NO_NEWS_TAG = tag
+            else:
+                debug("Bu saat için 'haber yok' mesajı zaten gönderilmiş, tekrar atlanıyor.")
 
     debug("===== JOB BİTTİ =====")
 
