@@ -1,22 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Render temiz sürüm (self-keepalive'lı)
-- Google News (RSS) + Opsiyonel extra kaynaklar (config.yaml)
-- Şirket eşleşmesi, domain beyaz liste, tarih filtresi, tekrar filtresi
+Tera News Watcher — Render sade sürüm (cron-job.org tetikler)
+- Google News (RSS) + opsiyonel extra kaynaklar (config.yaml)
+- Şirket eşleşmesi, domain beyaz liste, sadece BUGÜN'ÜN haberleri
 - Telegram gönderimi
-- /health, /test, /restart endpoint'leri
-- İçeriden kendi kendine /health ping atarak Render'ı uyanık tutar
+- /health, /test, /restart ve /cron endpoint'leri
 """
 
 import os
 import time
-import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlparse
 
 import requests
 from flask import Flask, jsonify, request
-import schedule
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
@@ -30,21 +27,15 @@ import yaml
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-POLL_INTERVAL_MIN  = int(os.getenv("POLL_INTERVAL_MIN", "10"))
-MAX_AGE_HOURS      = int(os.getenv("MAX_AGE_HOURS", "72"))  # şu an kullanılmıyor ama dursun
-
 # Türkiye saati için UTC+3 (istersen .env'den değiştirebilirsin)
 TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
 # Domain filtresini komple kapatmak istersen "true" yap
-# Not: eski sürümle uyum için logic aynı bırakıldı
-DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "false"
+DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "true"
 
-# Restart güvenliği (opsiyonel)
+# Restart / cron için token
 RESTART_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
-
-# Kendi kendine ping için
-KEEPALIVE_URL = os.getenv("KEEPALIVE_URL", "").strip()
+CRON_TOKEN = os.getenv("CRON_TOKEN", "").strip() or RESTART_TOKEN
 
 # =========================
 # Dosyalar
@@ -104,9 +95,8 @@ DEFAULT_ALLOWED_DOMAINS = [
 # =========================
 # Global durum / yardımcılar
 # =========================
-LAST_JOB_TIME    = None
-LAST_ERROR_TIME  = None
-LAST_NO_NEWS_TAG = None   # "2025-11-14-15" gibi
+LAST_JOB_TIME  = None
+LAST_ERROR_TIME = None
 ERROR_COOLDOWN_MIN = 30
 
 app = Flask(__name__)
@@ -318,19 +308,9 @@ def bootstrap():
         f.write(datetime.now(timezone.utc).isoformat())
     debug(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi.")
 
-# =============== KEEPALIVE (Render'ı uyutmama) ===============
-def self_ping():
-    if not KEEPALIVE_URL:
-        return
-    try:
-        r = requests.get(KEEPALIVE_URL, timeout=10)
-        debug(f"[KEEPALIVE] {KEEPALIVE_URL} -> {r.status_code}")
-    except Exception as e:
-        debug(f"[KEEPALIVE] hata: {e}")
-
 # =============== İş (job) ===============
 def job():
-    global LAST_JOB_TIME, LAST_NO_NEWS_TAG
+    global LAST_JOB_TIME
 
     now_utc = datetime.now(timezone.utc)
     local_time = now_utc + timedelta(hours=TZ_OFFSET_HOURS)  # Türkiye saati
@@ -352,7 +332,7 @@ def job():
                 if it["id"] in seen_set:
                     continue
 
-                # 🔹 SADECE BUGÜNÜN HABERLERİ
+                # SADECE BUGÜNÜN HABERLERİ
                 if it["pub_dt"] and it["pub_dt"].date() != today_utc:
                     continue
 
@@ -373,7 +353,7 @@ def job():
                 if it["id"] in seen_set:
                     continue
 
-                # 🔹 SADECE BUGÜNÜN HABERLERİ
+                # SADECE BUGÜNÜN HABERLERİ
                 if it.get("pub_dt") and it["pub_dt"].date() != today_utc:
                     continue
 
@@ -401,43 +381,18 @@ def job():
 
         save_seen(seen_list)
         debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
-
     else:
         debug(LAST_JOB_TIME, "- Yeni haber yok.")
 
-        # 🔔 Hafta içi 08:00–18:00 arası, her saat için EN FAZLA 1 "haber yok" bildirimi
+        # Hafta içi 08:00–18:00 arası, saat başı "haber yok" bildirimi
         weekday = local_time.weekday()   # 0 = Pazartesi, 6 = Pazar
         hour    = local_time.hour
 
         if 0 <= weekday <= 4 and 8 <= hour <= 18:
             today_local = local_time.date().isoformat()
-            tag = f"{today_local}-{hour:02d}"
-
-            if tag != LAST_NO_NEWS_TAG:
-                send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
-                LAST_NO_NEWS_TAG = tag
-            else:
-                debug("Bu saat için 'haber yok' mesajı zaten gönderilmiş, tekrar atlanıyor.")
+            send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
 
     debug("===== JOB BİTTİ =====")
-
-def scheduler_thread():
-    if not os.path.exists(INIT_FILE):
-        bootstrap()
-
-    # hemen bir kez çalıştır
-    job()
-
-    # sonra periyodik
-    schedule.every(POLL_INTERVAL_MIN).minutes.do(job)
-
-    # kendi kendine Render'ı uyanık tut
-    if KEEPALIVE_URL:
-        schedule.every(5).minutes.do(self_ping)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
 # =============== Flask endpoints ===============
 @app.get("/")
@@ -466,17 +421,31 @@ def restart():
         if (request.args.get("token", "").strip() != RESTART_TOKEN):
             return jsonify({"ok": False, "error": "unauthorized"}), 403
 
-    debug("♻️ Self-restart istendi; 2 sn sonra çıkılacak…")
-    def _do_exit():
-        time.sleep(2)
-        debug("Self-restart: process sonlandırılıyor.")
-        os._exit(0)
-    threading.Thread(target=_do_exit, daemon=True).start()
-    return jsonify({"ok": True, "message": "restart scheduled"}), 200
+    debug("♻️ Self-restart istendi; process sonlandırılıyor.")
+    os._exit(0)  # Render yeni instance açıyor
+    # buraya zaten gelmez
+    # return jsonify({"ok": True, "message": "restart scheduled"}), 200
+
+@app.get("/cron")
+def cron_run():
+    """cron-job.org buraya vuracak ve job() tek sefer çalışacak"""
+    if CRON_TOKEN:
+        if (request.args.get("token", "").strip() != CRON_TOKEN):
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+
+    # ilk kurulum yapılmamışsa yap
+    if not os.path.exists(INIT_FILE):
+        bootstrap()
+
+    try:
+        job()
+        return jsonify({"ok": True, "message": "job executed"}), 200
+    except Exception as e:
+        notify_error(f"/cron error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # =============== Entry ===============
 def main():
-    threading.Thread(target=scheduler_thread, daemon=True).start()
     port = int(os.environ.get("PORT", "10000"))
     debug(f"🌐 Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
