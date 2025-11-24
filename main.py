@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Tera News Watcher — Sade CRON sürümü
-- Haber taraması SADECE /cron endpoint'iyle tetiklenir (cron-job.org tarafından).
-- İçeride schedule/poll yok; her tetiklemede tek sefer job() çalışır.
+Tera News Watcher - sade cron sürümü
+- İçeride sürekli dönen scheduler/thread YOK
+- Sadece /cron endpoint'i var; cron-job.org her saat çağırıyor
+- Google News RSS + opsiyonel extra kaynaklar (config.yaml)
+- Şirket eşleşmesi, domain beyaz liste, tekrar filtresi
+- Telegram gönderimi
 """
 
 import os
 import time
-import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlparse
 
@@ -16,6 +18,7 @@ from flask import Flask, jsonify, request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
+# Opsiyonel kaynaklar
 import feedparser
 import yaml
 
@@ -25,21 +28,18 @@ import yaml
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# Sadece log / saat hesabı için (Türkiye = 3)
+# Türkiye saati için UTC+3 (istersen env'den değiştirebilirsin)
 TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
-# /cron ve /restart için ortak token
-RESTART_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
-
-# *** Domain filtresini kapatmak istersen: DISABLE_DOMAIN_FILTER=true ***
-DISABLE_DOMAIN_FILTER = os.getenv("DISABLE_DOMAIN_FILTER", "false").lower() == "true"
+# /cron için güvenlik token'ı
+CRON_TOKEN = os.getenv("RESTART_TOKEN", "").strip()  # TERA1234 kullanıyorduk
 
 # =========================
 # Dosyalar
 # =========================
 SEEN_FILE   = "seen_ids.txt"
 INIT_FILE   = ".initialized"
-MAX_SEEN_IDS = 50000  # maksimum satır sayısı
+MAX_SEEN_IDS = 50000
 
 # =========================
 # Anahtar kelimeler & Şirket eşleşmesi
@@ -74,7 +74,7 @@ BASE_KEYWORDS = [
     "tra bilişim", "viva terra",
 ]
 
-# Domain beyaz liste (config.yaml ile birleşecek)
+# Default domain beyaz liste (config.yaml ile birleşecek)
 DEFAULT_ALLOWED_DOMAINS = [
     # büyük haber
     "hurriyet.com.tr", "milliyet.com.tr", "cnnturk.com", "ntv.com.tr",
@@ -90,19 +90,13 @@ DEFAULT_ALLOWED_DOMAINS = [
 ]
 
 # =========================
-# Global durum
+# Global durum / yardımcılar
 # =========================
 LAST_JOB_TIME   = None
 LAST_ERROR_TIME = None
 ERROR_COOLDOWN_MIN = 30
 
-JOB_LOCK = threading.Lock()
-
 app = Flask(__name__)
-
-# =========================
-# Yardımcılar
-# =========================
 
 def debug(*a):
     print(*a, flush=True)
@@ -125,7 +119,7 @@ def send_telegram(text: str):
         r = requests.post(
             u,
             data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=15,
+            timeout=20,
         )
         debug("Telegram status:", r.status_code)
     except Exception as e:
@@ -152,8 +146,6 @@ ALLOWED_DOMAINS = list(dict.fromkeys(DEFAULT_ALLOWED_DOMAINS + [
 ]))
 
 def domain_allowed(link: str) -> bool:
-    if DISABLE_DOMAIN_FILTER:
-        return True
     try:
         netloc = urlparse(link).netloc.lower()
         if netloc.startswith("www."):
@@ -285,25 +277,20 @@ def gather_extra_sources():
 
 # =============== Bootstrap ===============
 def bootstrap():
-    """İlk çalıştırmada seen_ids dosyasını doldurur."""
     seen_list, _ = load_seen()
     added = 0
-
     for kw in KEYWORDS:
         try:
             xml = google_news_rss(kw)
             for it in parse_rss(xml):
                 if it["id"] not in seen_list:
-                    seen_list.append(it["id"])
-                    added += 1
+                    seen_list.append(it["id"]); added += 1
         except Exception as e:
             debug("bootstrap err (kw):", kw, e)
-
     try:
         for it in gather_extra_sources():
             if it["id"] not in seen_list:
-                seen_list.append(it["id"])
-                added += 1
+                seen_list.append(it["id"]); added += 1
     except Exception as e:
         debug("bootstrap err (extra):", e)
 
@@ -312,92 +299,90 @@ def bootstrap():
         f.write(datetime.now(timezone.utc).isoformat())
     debug(f"✅ İlk kurulum tamam: {added} mevcut haber işaretlendi.")
 
-# =============== JOB ===============
+# =============== Ana iş (cron ile çağrılıyor) ===============
 def job():
-    """Tek seferlik haber taraması. /cron tarafından çağrılır."""
     global LAST_JOB_TIME
 
-    with JOB_LOCK:
-        now_utc   = datetime.now(timezone.utc)
-        local_time = now_utc + timedelta(hours=TZ_OFFSET_HOURS)
-        today_utc = now_utc.date()
+    now_utc    = datetime.now(timezone.utc)
+    local_time = now_utc + timedelta(hours=TZ_OFFSET_HOURS)
+    today_utc  = now_utc.date()
 
-        debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "local:", local_time.isoformat())
+    LAST_JOB_TIME = now_utc
 
-        seen_list, seen_set = load_seen()
-        new_items = []
+    debug("===== JOB BAŞLANGIÇ =====", now_utc.isoformat(), "local:", local_time.isoformat())
 
-        # 1) Google News (kelime bazlı)
-        for kw in KEYWORDS:
-            try:
-                debug(f"[{kw}] Google News RSS çekiliyor...")
-                xml = google_news_rss(kw)
-                items = parse_rss(xml)
-                debug(f"[{kw}] RSS item sayısı:", len(items))
-                for it in items:
-                    if it["id"] in seen_set:
-                        continue
+    seen_list, seen_set = load_seen()
+    new_items = []
 
-                    # Sadece BUGÜN'ün haberleri
-                    if it["pub_dt"] and it["pub_dt"].date() != today_utc:
-                        continue
-
-                    if not domain_allowed(it["link"]):
-                        continue
-                    if not matches_company(it):
-                        continue
-                    new_items.append(("KW", kw, it))
-                    seen_set.add(it["id"])
-                    seen_list.append(it["id"])
-            except Exception as e:
-                notify_error(f"{kw!r} kelimesi taranırken hata: {e}")
-
-        # 2) Extra sources (config.yaml)
+    # 1) Google News
+    for kw in KEYWORDS:
         try:
-            extra = gather_extra_sources()
-            for it in extra:
-                try:
-                    if it["id"] in seen_set:
-                        continue
-                    if it.get("pub_dt") and it["pub_dt"].date() != today_utc:
-                        continue
-                    if it.get("link") and not domain_allowed(it["link"]):
-                        continue
-                    if not matches_company(it):
-                        continue
-                    new_items.append((it.get("source", "EXT"), "", it))
-                    seen_set.add(it["id"])
-                    seen_list.append(it["id"])
-                except Exception as ee:
-                    notify_error(f"extra item error: {ee}")
+            debug(f"[{kw}] Google News RSS çekiliyor...")
+            xml = google_news_rss(kw)
+            items = parse_rss(xml)
+            debug(f"[{kw}] RSS item sayısı:", len(items))
+            for it in items:
+                if it["id"] in seen_set:
+                    continue
+                if it["pub_dt"] and it["pub_dt"].date() != today_utc:
+                    continue
+                if not domain_allowed(it["link"]):
+                    continue
+                if not matches_company(it):
+                    continue
+                new_items.append(("KW", kw, it))
+                seen_set.add(it["id"]); seen_list.append(it["id"])
         except Exception as e:
-            notify_error(f"extra sources error: {e}")
+            notify_error(f"{kw!r} kelimesi taranırken hata: {e}")
 
-        # Sonuç
-        LAST_JOB_TIME = datetime.now(timezone.utc)
+    # 2) Extra sources
+    try:
+        extra = gather_extra_sources()
+        for it in extra:
+            try:
+                if it["id"] in seen_set:
+                    continue
+                if it.get("pub_dt") and it["pub_dt"].date() != today_utc:
+                    continue
+                if it.get("link") and not domain_allowed(it["link"]):
+                    continue
+                if not matches_company(it):
+                    continue
+                new_items.append((it.get("source", "EXT"), "", it))
+                seen_set.add(it["id"]); seen_list.append(it["id"])
+            except Exception as ee:
+                notify_error(f"extra item error: {ee}")
+    except Exception as e:
+        notify_error(f"extra sources error: {e}")
 
-        if new_items:
-            for src, kw, it in new_items:
-                head = kw.upper() if kw else src.upper()
-                pub_str = it.get("pub") or (it.get("pub_dt").isoformat() if it.get("pub_dt") else "")
-                msg = f"📰 <b>{head}</b>\n{it.get('title','')}\n{it.get('link','')}\n{pub_str}"
-                send_telegram(msg)
+    # Sonuç
+    if new_items:
+        for src, kw, it in new_items:
+            head = kw.upper() if kw else src.upper()
+            pub_str = it.get("pub") or (it.get("pub_dt").isoformat() if it.get("pub_dt") else "")
+            msg = f"📰 <b>{head}</b>\n{it.get('title','')}\n{it.get('link','')}\n{pub_str}"
+            send_telegram(msg)
 
-            save_seen(seen_list)
-            debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
-        else:
-            debug(LAST_JOB_TIME, "- Yeni haber yok.")
+        save_seen(seen_list)
+        debug(LAST_JOB_TIME, "-", len(new_items), "haber gönderildi.")
+    else:
+        debug(LAST_JOB_TIME, "- Yeni haber yok.")
 
-            # Hafta içi 08:00–18:00 arası saat başı "haber yok"
-            weekday = local_time.weekday()   # 0 = Pazartesi
-            hour    = local_time.hour
-            minute  = local_time.minute
+        # Hafta içi 08:00–18:00 arası, saat başı "haber yok" bildirimi
+        weekday = local_time.weekday()   # 0=Pazartesi
+        hour    = local_time.hour
+        minute  = local_time.minute
 
-            if (0 <= weekday <= 4) and (8 <= hour <= 18) and (minute == 0):
-                today_local = local_time.date().isoformat()
-                send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
+        if (
+            0 <= weekday <= 4 and
+            8 <= hour <= 18 and
+            minute == 0
+        ):
+            today_local = local_time.date().isoformat()
+            send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
 
-        debug("===== JOB BİTTİ =====")
+    debug("===== JOB BİTTİ =====")
+    return len(new_items)
 
 # =============== Flask endpoints ===============
 @app.get("/")
@@ -413,43 +398,28 @@ def health():
     else:
         ago = (now - LAST_JOB_TIME).total_seconds()
         last_iso = LAST_JOB_TIME.isoformat()
-    return jsonify(ok=True, time=now.isoformat(), last_job=last_iso, last_job_ago_seconds=ago), 200
-
-@app.get("/test")
-def test_notification():
-    send_telegram("🧪 Test bildirimi: TERA News Watcher çalışıyor gibi görünüyor.")
-    return "Test bildirimi gönderildi.", 200
+    return jsonify(ok=True, time=now.isoformat(),
+                   last_job=last_iso,
+                   last_job_ago_seconds=ago), 200
 
 @app.get("/cron")
 def cron_trigger():
-    """Cron-job.org burayı çağıracak."""
-    if RESTART_TOKEN and (request.args.get("token", "").strip() != RESTART_TOKEN):
+    token = request.args.get("token", "").strip()
+    if CRON_TOKEN and token != CRON_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
 
-    debug("[CRON] çağrı alındı; job() arka planda çalıştırılacak.")
-    threading.Thread(target=job, daemon=True).start()
-    return jsonify({"ok": True, "message": "job triggered"}), 200
-
-@app.get("/restart")
-def restart():
-    if RESTART_TOKEN and (request.args.get("token", "").strip() != RESTART_TOKEN):
-        return jsonify({"ok": False, "error": "unauthorized"}), 403
-
-    debug("♻️ Self-restart istendi; 2 sn sonra çıkılacak…")
-    def _do_exit():
-        time.sleep(2)
-        debug("Self-restart: process sonlandırılıyor.")
-        os._exit(0)
-    threading.Thread(target=_do_exit, daemon=True).start()
-    return jsonify({"ok": True, "message": "restart scheduled"}), 200
+    debug("[cron] çağrıldı, job() tetikleniyor...")
+    try:
+        cnt = job()
+        return jsonify({"ok": True, "new_items": cnt}), 200
+    except Exception as e:
+        notify_error(f"/cron çalışırken hata: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # =============== Entry ===============
 def main():
     if not os.path.exists(INIT_FILE):
         bootstrap()
-    else:
-        debug("INIT_FILE mevcut, bootstrap atlandı.")
-
     port = int(os.environ.get("PORT", "10000"))
     debug(f"🌐 Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
