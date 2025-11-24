@@ -416,6 +416,11 @@ def cron_trigger():
         notify_error(f"/cron çalışırken hata: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.get("/test")
+def test_notification():
+    send_telegram("🧪 Test bildirimi: Sistem çalışıyor (TERA News Watcher /test).")
+    return "Test bildirimi gönderildi.", 200
+
 # =============== Entry ===============
 def main():
     if not os.path.exists(INIT_FILE):
