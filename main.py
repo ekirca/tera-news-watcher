@@ -403,18 +403,23 @@ def health():
                    last_job_ago_seconds=ago), 200
 
 @app.get("/cron")
-def cron_trigger():
+def cron_runner():
+    """
+    Cron-job.org burayı çağıracak.
+    - İstek hemen 200 OK dönecek
+    - job() arka planda çalışacak
+    """
     token = request.args.get("token", "").strip()
-    if CRON_TOKEN and token != CRON_TOKEN:
+
+    if RESTART_TOKEN and token != RESTART_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
 
-    debug("[cron] çağrıldı, job() tetikleniyor...")
-    try:
-        cnt = job()
-        return jsonify({"ok": True, "new_items": cnt}), 200
-    except Exception as e:
-        notify_error(f"/cron çalışırken hata: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+    debug("[cron] çağrıldı, job() arka planda çalışacak...")
+
+    threading.Thread(target=job, daemon=True).start()
+
+    return jsonify({"ok": True, "message": "job started"}), 200
+
 
 @app.get("/test")
 def test_notification():
