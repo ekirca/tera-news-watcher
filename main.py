@@ -382,7 +382,11 @@ def job():
             send_telegram(f"🟡 Bugün ({today_local}) TERA ile ilgili yeni haber yok.")
 
     debug("===== JOB BİTTİ =====")
-    return len(new_items)
+    # === HABER YOK MESAJI ===
+    if new_items_count == 0:
+        send_telegram("Haber yok (son kontrol).")
+
+    return new_items_count
 
 # =============== Flask endpoints ===============
 @app.get("/")
