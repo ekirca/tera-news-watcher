@@ -33,6 +33,7 @@ TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
 # /cron için güvenlik token'ı
 CRON_TOKEN = os.getenv("RESTART_TOKEN", "").strip()  # TERA1234 kullanıyorduk
+RESTART_TOKEN = os.environ.get("RESTART_TOKEN", "")
 
 # =========================
 # Dosyalar
