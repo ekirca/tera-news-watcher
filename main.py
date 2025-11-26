@@ -1,314 +1,215 @@
-import os
-from datetime import datetime, timedelta, timezone
+# -*- coding: utf-8 -*-
+"""
+TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY
+Sadece bugünün haberlerini alır.
+Sessiz, hafif, kararlı, bozulmaz sistem.
+"""
 
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+from typing import NamedTuple
 import requests
 import feedparser
-from email.utils import parsedate_to_datetime
 from flask import Flask, jsonify, request
 
-# ==========================
-# Ortam değişkenleri
-# ==========================
+# ======================================================
+# ENV
+# ======================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+CRON_TOKEN         = os.getenv("CRON_TOKEN", "").strip()
 
-# Türkiye saati için UTC+3 (Render UTC çalışıyor)
-TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "3"))
-LOCAL_TZ = timezone(timedelta(hours=TZ_OFFSET_HOURS))
+TZ_OFFSET = int(os.getenv("TZ_OFFSET_HOURS", "3"))
+SESSION = requests.Session()
 
-# Cron güvenlik token'i (cron-job.org URL'inde ?token=TERA1234 kullanıyorsun)
-CRON_TOKEN = os.getenv("RESTART_TOKEN", "").strip()
-
-# Seen ID dosyası (aynı haberi tekrar yollamamak için)
 SEEN_FILE = "seen_ids.txt"
 
-# Hata spam'ini engellemek için
-LAST_ERROR_TIME = None
-ERROR_COOLDOWN_MIN = 30
+# ======================================================
+# NEWS STRUCTURE
+# ======================================================
+class NewsItem(NamedTuple):
+    published_dt: datetime
+    feed_name: str
+    entry: dict
+    item_id: str
 
-# "Bugün haber yok" mesajını saat başı en fazla 1 kez atmak için
-LAST_NO_NEWS_TAG = None
-
-# ==========================
-# RSS kaynakları
-# ==========================
-RSS_FEEDS = [
-    {
-        "name": "Tera",
-        "url": "https://news.google.com/rss/search?q=%22Tera%20Yat%C4%B1r%C4%B1m%22&hl=tr&gl=TR&ceid=TR:tr",
-    },
-    {
-        "name": "Tera Yatırım",
-        "url": "https://news.google.com/rss/search?q=Tera%20Yat%C4%B1r%C4%B1m&hl=tr&gl=TR&ceid=TR:tr",
-    },
-    {
-        "name": "TEHOL",
-        "url": "https://news.google.com/rss/search?q=TEHOL&hl=tr&gl=TR&ceid=TR:tr",
-    },
-    {
-        "name": "TLY",
-        "url": "https://news.google.com/rss/search?q=TLY&hl=tr&gl=TR&ceid=TR:tr",
-    },
-    {
-        "name": "Tera Şirketleri",
-        "url": "https://news.google.com/rss/search?q=%22Tera%20Yat%C4%B1r%C4%B1m%20Menkul%22&hl=tr&gl=TR&ceid=TR:tr",
-    },
-    {
-        "name": "FSU",
-        "url": "https://news.google.com/rss/search?q=FSU&hl=tr&gl=TR&ceid=TR:tr",
-    },
-]
-
-# ==========================
-# Yardımcı fonksiyonlar
-# ==========================
-
-
-def debug(*args):
-    print(*args, flush=True)
-
-
-def parse_date(date_str: str, tz: timezone) -> datetime:
-    """
-    Google News'ten gelen pubDate/published alanlarını sağlam bir şekilde
-    datetime'e çevir. Hata olursa şu anki zamanı döner.
-    """
-    if not date_str:
-        return datetime.now(tz)
-
-    # 1) email.utils parser
-    try:
-        dt = parsedate_to_datetime(date_str)
-        if dt is not None:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(tz)
-    except Exception:
-        pass
-
-    # 2) Farklı olası format denemeleri
-    formats = [
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S%z",
-    ]
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(tz)
-        except Exception:
-            continue
-
-    # 3) En son çare
-    return datetime.now(tz)
-
-
-def load_seen_ids() -> set:
-    try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            ids = {line.strip() for line in f if line.strip()}
-        return ids
-    except FileNotFoundError:
-        return set()
-    except Exception as e:
-        debug("Seen dosyası okunamadı:", e)
-        return set()
-
-
-def save_seen_ids(ids: set) -> None:
-    try:
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            for _id in ids:
-                f.write(_id + "\n")
-    except Exception as e:
-        debug("Seen dosyası yazılamadı:", e)
-
-
-def make_item_id(feed_name: str, entry) -> str:
-    title = (entry.get("title") or "").strip()
-    link = (entry.get("link") or "").strip()
-    return f"{feed_name}|{title}|{link}"
-
-
-def send_telegram(text: str) -> None:
+# ======================================================
+# SEND TELEGRAM
+# ======================================================
+def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        debug("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID yok, mesaj atılmadı.")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {
+        SESSION.post(url, data={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
-            "parse_mode": "HTML",
-        }
-        r = requests.post(url, data=data, timeout=20)
-        debug("Telegram status:", r.status_code)
-    except Exception as e:
-        debug("Telegram error:", e)
+            "parse_mode": "HTML"
+        }, timeout=15)
+    except:
+        pass
 
+# ======================================================
+# SEEN SYSTEM
+# ======================================================
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    with open(SEEN_FILE, "r", encoding="utf-8") as f:
+        return set(x.strip() for x in f if x.strip())
 
-def notify_error(msg: str) -> None:
-    global LAST_ERROR_TIME
-    now_utc = datetime.now(timezone.utc)
-    if LAST_ERROR_TIME is not None:
-        diff = (now_utc - LAST_ERROR_TIME).total_seconds()
-        if diff < ERROR_COOLDOWN_MIN * 60:
-            debug("ERROR (susturuldu):", msg)
-            return
-    LAST_ERROR_TIME = now_utc
-    debug("ERROR:", msg)
-    send_telegram(f"⚠️ Hata uyarısı:\n{msg}")
+def save_seen(seen: set):
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        for _id in list(seen)[-50000:]:
+            f.write(_id + "\n")
 
+# ======================================================
+# DATE PARSING (BUGÜN FİLTRESİ)
+# ======================================================
+def parse_date(entry) -> datetime | None:
+    fields = ["published", "updated", "pubDate"]
+    for field in fields:
+        if field in entry:
+            try:
+                dt = feedparser.parse(entry[field]).entries[0].published_parsed
+                if dt:
+                    return datetime.fromtimestamp(time.mktime(dt), tz=timezone.utc)
+            except:
+                pass
 
-def send_no_news_if_needed(now_local: datetime) -> None:
-    """
-    Hafta içi 08:00–18:00 arasında, saat başı en fazla 1 kez
-    'Bugün yeni haber yok' mesajı at.
-    """
-    global LAST_NO_NEWS_TAG
+    # fallback
+    if "published_parsed" in entry and entry.published_parsed:
+        return datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
 
-    weekday = now_local.weekday()  # 0 = Pazartesi
-    hour = now_local.hour
-    if weekday > 4:
-        return
-    if not (8 <= hour < 18):
-        return
+    return None
 
-    tag = now_local.strftime("%Y-%m-%d %H")
-    if LAST_NO_NEWS_TAG == tag:
-        return
+def is_today(dt: datetime) -> bool:
+    if not dt:
+        return False
+    now = datetime.now(timezone.utc)
+    local_dt = dt + timedelta(hours=TZ_OFFSET)
+    local_today = (now + timedelta(hours=TZ_OFFSET)).date()
+    return local_dt.date() == local_today
 
-    text = f"📢 Bugün ({now_local.date()}) TERA ile ilgili yeni haber yok."
-    send_telegram(text)
-    LAST_NO_NEWS_TAG = tag
+# ======================================================
+# ALLOWED DOMAINS
+# ======================================================
+ALLOWED = {
+    "kap.org.tr",
+    "borsagundem.com",
+    "bloomberght.com",
+    "investing.com",
+    "mynet.com",
+    "bigpara.com",
+    "terayatirim.com",
+    "terayatirim.com.tr",
+    "x.com",
+    "twitter.com"
+}
 
-
-def fetch_feed_entries(url: str):
+def domain_ok(link: str) -> bool:
     try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        parsed = feedparser.parse(r.text)
-        return parsed.entries
-    except Exception as e:
-        notify_error(f"RSS okunamadı: {url} -> {e}")
+        host = urlparse(link).hostname or ""
+        return any(host.endswith(d) for d in ALLOWED)
+    except:
+        return False
+
+# ======================================================
+# FEED LIST
+# ======================================================
+FEEDS = [
+    ("Tera Yatırım", "https://news.google.com/rss/search?q=Tera+Yatırım&hl=tr&gl=TR&ceid=TR:tr"),
+    ("Tera Yatirim", "https://news.google.com/rss/search?q=Tera+Yatirim&hl=tr&gl=TR&ceid=TR:tr"),
+    ("TEHOL",        "https://news.google.com/rss/search?q=TEHOL&hl=tr&gl=TR&ceid=TR:tr"),
+    ("TRHOL",        "https://news.google.com/rss/search?q=TRHOL&hl=tr&gl=TR&ceid=TR:tr"),
+    ("TLY",          "https://news.google.com/rss/search?q=TLY&hl=tr&gl=TR&ceid=TR:tr"),
+    ("FSU",          "https://news.google.com/rss/search?q=FSU&hl=tr&gl=TR&ceid=TR:tr"),
+]
+
+# ======================================================
+# FETCH FEED (STABLE)
+# ======================================================
+def fetch_feed(name: str, url: str):
+    try:
+        r = SESSION.get(url, timeout=20)
+        feed = feedparser.parse(r.text)
+        entries = []
+        for entry in feed.entries:
+            dt = parse_date(entry)
+            if not dt or not is_today(dt):
+                continue
+
+            link = entry.get("link", "")
+            if not domain_ok(link):
+                continue
+
+            _id = entry.get("id") or entry.get("link") or entry.get("title", "")
+            entries.append(NewsItem(dt, name, entry, _id))
+        return entries
+    except:
         return []
 
-
-# ==========================
-# Ana iş (job)
-# ==========================
-
-
-def job() -> int:
-    """
-    - RSS'leri çeker
-    - Sadece bugünün haberlerini süzer
-    - Daha önce gönderilmemiş olanları Telegram'a yollar
-    - Yeni haber yoksa gerekli saatlerde 'haber yok' bildirimi atar
-    """
-    debug("===== JOB BAŞLADI =====")
-    now_local = datetime.now(LOCAL_TZ)
-    today = now_local.date()
-
-    seen_ids = load_seen_ids()
+# ======================================================
+# JOB
+# ======================================================
+def job():
+    seen = load_seen()
     new_items = []
 
-    for feed in RSS_FEEDS:
-        name = feed["name"]
-        url = feed["url"]
-        entries = fetch_feed_entries(url)
-        debug(f"[{name}] RSS item sayısı: {len(entries)}")
+    for name, url in FEEDS:
+        items = fetch_feed(name, url)
+        for it in items:
+            if it.item_id not in seen:
+                new_items.append(it)
+                seen.add(it.item_id)
 
-        for entry in entries:
-            pub_raw = (
-                entry.get("published")
-                or entry.get("pubDate")
-                or entry.get("updated")
-                or ""
-            )
-            pub_dt = parse_date(pub_raw, LOCAL_TZ)
-            if pub_dt.date() != today:
-                continue
+    save_seen(seen)
 
-            _id = make_item_id(name, entry)
-            if _id in seen_ids:
-                continue
+    # sort by date
+    new_items.sort(key=lambda x: x.published_dt)
 
-            new_items.append((pub_dt, name, entry, _id))
-
-    # Tarihe göre sırala (eski → yeni)
-    new_items.sort(key=lambda x: x[0])
-
-    sent_count = 0
-    for pub_dt, name, entry, _id in new_items:
-        title = (entry.get("title") or "").strip()
-        link = (entry.get("link") or "").strip()
-        msg = (
-            f"📰 <b>{name}</b>\n"
-            f"{title}\n"
-            f"{link}\n"
-            f"({pub_dt.strftime('%Y-%m-%d %H:%M')})"
-        )
+    # send new
+    for it in new_items:
+        msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
         send_telegram(msg)
-        seen_ids.add(_id)
-        sent_count += 1
 
-    if sent_count > 0:
-        save_seen_ids(seen_ids)
-        debug("Yeni haber sayısı:", sent_count)
-    else:
-        debug("Yeni haber yok.")
-        send_no_news_if_needed(now_local)
+    # if no news at xx:00
+    now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
+    if not new_items:
+        if now_local.weekday() < 5:  # hafta içi
+            if 8 <= now_local.hour <= 18 and now_local.minute == 0:
+                send_telegram(f"🟡 Bugün TERA ile ilgili yeni haber yok.")
 
-    debug("===== JOB BİTTİ =====")
-    return sent_count
+    return len(new_items)
 
-
-# ==========================
-# Flask endpoints
-# ==========================
-
+# ======================================================
+# FLASK
+# ======================================================
 app = Flask(__name__)
-
 
 @app.get("/")
 def home():
     return "Alive", 200
 
-
-@app.get("/health")
-def health():
-    now_utc = datetime.utcnow().isoformat()
-    return jsonify({"ok": True, "time_utc": now_utc}), 200
-
-
 @app.get("/cron")
 def cron():
-    token = request.args.get("token", "").strip()
+    token = request.args.get("token", "")
     if CRON_TOKEN and token != CRON_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
 
-    try:
-        cnt = job()
-        return jsonify({"ok": True, "new_items": cnt}), 200
-    except Exception as e:
-        notify_error(f"/cron çalışırken hata: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
+    count = job()
+    return jsonify({"ok": True, "new_items": count}), 200
 
 @app.get("/test")
-def test_notification():
-    send_telegram("✅ Test bildirimi: Sistem çalışıyor. (/test)")
-    return jsonify({"ok": True}), 200
+def test():
+    send_telegram("🧪 Test bildirimi.")
+    return "ok", 200
 
-
-# ==========================
-# Local çalıştırma
-# ==========================
-
+# ======================================================
+# RUN
+# ======================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
-    debug(f"Flask başlıyor, port={port}")
     app.run(host="0.0.0.0", port=port)
