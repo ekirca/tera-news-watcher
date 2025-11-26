@@ -278,6 +278,13 @@ app = Flask(__name__)
 def home():
     return "Alive", 200
 
+@app.get("/health")
+def health():
+    # UptimeRobot ve Render bu endpoint'i kontrol ediyor
+    # Sadece 200 OK dönmesi yeterli
+    return "ok", 200
+
+
 @app.get("/cron")
 def cron():
     t = request.args.get("token", "")
