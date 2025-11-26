@@ -1,5 +1,4 @@
 requests
 Flask
 feedparser
-requests
 gunicorn
