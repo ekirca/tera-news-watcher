@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY (DATE ENGINE UPGRADED)
-Sadece bugünün haberlerini çeker + multi-layer date parser + hafif & stabil.
+TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY (DATE ENGINE + NO-NEWS TAG)
+Sadece bugünün haberlerini çeker, eski haberi asla göndermez.
+'Haber yok' mesajını saat içinde sadece bir kere yazar.
 """
 
 import os
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
-from typing import NamedTuple
+from typing import NamedTuple, Optional
+
 import requests
 import feedparser
 from flask import Flask, jsonify, request
@@ -24,6 +26,7 @@ TZ_OFFSET = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 SESSION = requests.Session()
 
 SEEN_FILE = "seen_ids.txt"
+LAST_NO_NEWS_FILE = "last_no_news_tag.txt"
 
 # ======================================================
 # NEWS STRUCT
@@ -37,47 +40,108 @@ class NewsItem(NamedTuple):
 # ======================================================
 # TELEGRAM
 # ======================================================
-def send_telegram(text: str):
+def send_telegram(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        SESSION.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML"
-        }, timeout=15)
-    except:
+        SESSION.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+            },
+            timeout=15,
+        )
+    except Exception:
+        # Telegram hatasına takılıp job çökmesin
         pass
 
 # ======================================================
 # SEEN SYSTEM
 # ======================================================
-def load_seen():
+def load_seen() -> set:
     if not os.path.exists(SEEN_FILE):
         return set()
-    with open(SEEN_FILE, "r", encoding="utf-8") as f:
-        return set(x.strip() for x in f if x.strip())
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return {line.strip() for line in f if line.strip()}
+    except Exception:
+        return set()
 
-def save_seen(seen: set):
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        for _id in list(seen)[-50000:]:
-            f.write(_id + "\n")
+def save_seen(seen: set) -> None:
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            for _id in list(seen)[-50000:]:
+                f.write(_id + "\n")
+    except Exception:
+        pass
 
 # ======================================================
-# ⭐ ADVANCED DATE PARSER (BUGÜN DIŞI HABER YOK GARANTİ)
+# NO-NEWS TAG (sadece saat başına bir kez)
 # ======================================================
-def parse_date(entry) -> datetime | None:
+def load_last_no_news_tag() -> Optional[str]:
+    if not os.path.exists(LAST_NO_NEWS_FILE):
+        return None
+    try:
+        with open(LAST_NO_NEWS_FILE, "r", encoding="utf-8") as f:
+            tag = f.read().strip()
+            return tag or None
+    except Exception:
+        return None
+
+def save_last_no_news_tag(tag: str) -> None:
+    try:
+        with open(LAST_NO_NEWS_FILE, "w", encoding="utf-8") as f:
+            f.write(tag)
+    except Exception:
+        pass
+
+def maybe_send_no_news(now_local: datetime) -> None:
+    """
+    Hafta içi 08:00–18:00 arası, saat başladıktan sonra ilk 10 dakika içinde
+    sadece bir kez 'Bugün yeni haber yok' mesajı gönderir.
+    Cron 09:00, 09:01, 09:05 fark etmez; o saat için bir kez çalışması yeter.
+    """
+    # Hafta içi mi?
+    if now_local.weekday() > 4:
+        return
+
+    # Saat aralığı 08–18 arası mı?
+    if not (8 <= now_local.hour <= 18):
+        return
+
+    # Saat başına 10 dakikalık tolerans penceresi:
+    if now_local.minute > 10:
+        return
+
+    tag = now_local.strftime("%Y-%m-%d %H")  # örn: "2025-11-26 09"
+    last_tag = load_last_no_news_tag()
+
+    if last_tag == tag:
+        # Bu saat için daha önce mesaj atılmış
+        return
+
+    # Mesajı gönder ve tag'i kaydet
+    msg = f"🟡 Bugün ({now_local.date()}) TERA ile ilgili yeni haber yok."
+    send_telegram(msg)
+    save_last_no_news_tag(tag)
+
+# ======================================================
+# ⭐ ADVANCED DATE PARSER
+# ======================================================
+def parse_date(entry) -> Optional[datetime]:
     """En güvenilir → en zayıf sırayla 4 katmanlı tarih çözümü."""
 
-    # 1) published_parsed → en temiz ve güvenilir
+    # 1) published_parsed
     if getattr(entry, "published_parsed", None):
         try:
             return datetime.fromtimestamp(
                 time.mktime(entry.published_parsed),
-                tz=timezone.utc
+                tz=timezone.utc,
             )
-        except:
+        except Exception:
             pass
 
     # 2) updated_parsed
@@ -85,9 +149,9 @@ def parse_date(entry) -> datetime | None:
         try:
             return datetime.fromtimestamp(
                 time.mktime(entry.updated_parsed),
-                tz=timezone.utc
+                tz=timezone.utc,
             )
-        except:
+        except Exception:
             pass
 
     # 3) published / updated / pubDate string alanlarından parse etme
@@ -95,24 +159,23 @@ def parse_date(entry) -> datetime | None:
         if field in entry:
             try:
                 fake = feedparser.parse(entry[field])
-                if fake.entries and fake.entries[0].published_parsed:
+                if fake.entries and getattr(fake.entries[0], "published_parsed", None):
                     return datetime.fromtimestamp(
                         time.mktime(fake.entries[0].published_parsed),
-                        tz=timezone.utc
+                        tz=timezone.utc,
                     )
-            except:
+            except Exception:
                 pass
 
-    # 4) hiçbir şey yok → tarihsiz haber → kabul etmiyoruz
+    # 4) hiçbir şey yok → tarihsiz haber → reddet
     return None
-
 
 def is_today(dt: datetime) -> bool:
     if not dt:
         return False
-    now = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
     local_dt = dt + timedelta(hours=TZ_OFFSET)
-    today_local = (now + timedelta(hours=TZ_OFFSET)).date()
+    today_local = (now_utc + timedelta(hours=TZ_OFFSET)).date()
     return local_dt.date() == today_local
 
 # ======================================================
@@ -128,14 +191,14 @@ ALLOWED = {
     "terayatirim.com",
     "terayatirim.com.tr",
     "x.com",
-    "twitter.com"
+    "twitter.com",
 }
 
 def domain_ok(link: str) -> bool:
     try:
         host = urlparse(link).hostname or ""
         return any(host.endswith(d) for d in ALLOWED)
-    except:
+    except Exception:
         return False
 
 # ======================================================
@@ -153,11 +216,11 @@ FEEDS = [
 # ======================================================
 # FEED FETCHER
 # ======================================================
-def fetch_feed(name: str, url: str):
+def fetch_feed(name: str, url: str) -> list[NewsItem]:
     try:
         r = SESSION.get(url, timeout=20)
         feed = feedparser.parse(r.text)
-        out = []
+        out: list[NewsItem] = []
 
         for entry in feed.entries:
             dt = parse_date(entry)
@@ -174,16 +237,15 @@ def fetch_feed(name: str, url: str):
             out.append(NewsItem(dt, name, entry, _id))
 
         return out
-
-    except:
+    except Exception:
         return []
 
 # ======================================================
 # JOB
 # ======================================================
-def job():
+def job() -> int:
     seen = load_seen()
-    new_items = []
+    new_items: list[NewsItem] = []
 
     for name, url in FEEDS:
         items = fetch_feed(name, url)
@@ -195,16 +257,15 @@ def job():
     save_seen(seen)
     new_items.sort(key=lambda x: x.published_dt)
 
+    # Yeni haberleri gönder
     for it in new_items:
         msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
         send_telegram(msg)
 
-    # "Haber yok" bildirimi
+    # Eğer haber yoksa → no-news mekanizmasına bırak
     now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
     if not new_items:
-        if now_local.weekday() < 5:
-            if 8 <= now_local.hour <= 18 and now_local.minute == 0:
-                send_telegram(f"🟡 Bugün TERA ile ilgili yeni haber yok.")
+        maybe_send_no_news(now_local)
 
     return len(new_items)
 
