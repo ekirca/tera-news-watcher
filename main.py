@@ -10,10 +10,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from typing import NamedTuple, Optional
+import logging # Hata yakalamak için eklendi!
 
 import requests
 import feedparser
 from flask import Flask, jsonify, request
+
+# LOGLAMA SEVİYESİNİ AYARLA
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ======================================================
 # ENV
@@ -42,6 +47,8 @@ class NewsItem(NamedTuple):
 # ======================================================
 def send_telegram(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        # Hata yakalama: Token yoksa log yaz
+        logger.warning("TELEGRAM_BOT_TOKEN veya CHAT_ID ayarlanmamış.")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -54,9 +61,12 @@ def send_telegram(text: str) -> None:
             },
             timeout=15,
         )
-    except Exception:
+    except Exception as e:
         # Telegram hatasına takılıp job çökmesin
+        logger.error(f"Telegram gönderme hatası: {e}")
         pass
+
+# ... (Diğer fonksiyonlar aynı kaldı)
 
 # ======================================================
 # SEEN SYSTEM
@@ -68,6 +78,7 @@ def load_seen() -> set:
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             return {line.strip() for line in f if line.strip()}
     except Exception:
+        logger.error("seen_ids.txt yükleme hatası.")
         return set()
 
 def save_seen(seen: set) -> None:
@@ -76,6 +87,7 @@ def save_seen(seen: set) -> None:
             for _id in list(seen)[-50000:]:
                 f.write(_id + "\n")
     except Exception:
+        logger.error("seen_ids.txt kaydetme hatası.")
         pass
 
 # ======================================================
@@ -89,6 +101,7 @@ def load_last_no_news_tag() -> Optional[str]:
             tag = f.read().strip()
             return tag or None
     except Exception:
+        logger.error("last_no_news_tag.txt yükleme hatası.")
         return None
 
 def save_last_no_news_tag(tag: str) -> None:
@@ -96,6 +109,7 @@ def save_last_no_news_tag(tag: str) -> None:
         with open(LAST_NO_NEWS_FILE, "w", encoding="utf-8") as f:
             f.write(tag)
     except Exception:
+        logger.error("last_no_news_tag.txt kaydetme hatası.")
         pass
 
 def maybe_send_no_news(now_local: datetime) -> None:
@@ -142,6 +156,7 @@ def parse_date(entry) -> Optional[datetime]:
                 tz=timezone.utc,
             )
         except Exception:
+            logger.debug("Tarih ayrıştırma hatası: published_parsed")
             pass
 
     # 2) updated_parsed
@@ -152,12 +167,14 @@ def parse_date(entry) -> Optional[datetime]:
                 tz=timezone.utc,
             )
         except Exception:
+            logger.debug("Tarih ayrıştırma hatası: updated_parsed")
             pass
 
     # 3) published / updated / pubDate string alanlarından parse etme
     for field in ["published", "updated", "pubDate"]:
         if field in entry:
             try:
+                # String alanı feedparser ile ayrıştırmayı dener
                 fake = feedparser.parse(entry[field])
                 if fake.entries and getattr(fake.entries[0], "published_parsed", None):
                     return datetime.fromtimestamp(
@@ -165,6 +182,7 @@ def parse_date(entry) -> Optional[datetime]:
                         tz=timezone.utc,
                     )
             except Exception:
+                logger.debug(f"Tarih ayrıştırma hatası: {field} string")
                 pass
 
     # 4) hiçbir şey yok → tarihsiz haber → reddet
@@ -198,7 +216,8 @@ def domain_ok(link: str) -> bool:
     try:
         host = urlparse(link).hostname or ""
         return any(host.endswith(d) for d in ALLOWED)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Alan adı ayrıştırma hatası: {e}")
         return False
 
 # ======================================================
@@ -237,37 +256,42 @@ def fetch_feed(name: str, url: str) -> list[NewsItem]:
             out.append(NewsItem(dt, name, entry, _id))
 
         return out
-    except Exception:
+    except Exception as e:
+        logger.error(f"Feed çekme hatası: {name} ({e})")
         return []
 
 # ======================================================
 # JOB
 # ======================================================
 def job() -> int:
-    seen = load_seen()
-    new_items: list[NewsItem] = []
+    try:
+        seen = load_seen()
+        new_items: list[NewsItem] = []
 
-    for name, url in FEEDS:
-        items = fetch_feed(name, url)
-        for it in items:
-            if it.item_id not in seen:
-                new_items.append(it)
-                seen.add(it.item_id)
+        for name, url in FEEDS:
+            items = fetch_feed(name, url)
+            for it in items:
+                if it.item_id not in seen:
+                    new_items.append(it)
+                    seen.add(it.item_id)
 
-    save_seen(seen)
-    new_items.sort(key=lambda x: x.published_dt)
+        save_seen(seen)
+        new_items.sort(key=lambda x: x.published_dt)
 
-    # Yeni haberleri gönder
-    for it in new_items:
-        msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
-        send_telegram(msg)
+        # Yeni haberleri gönder
+        for it in new_items:
+            msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
+            send_telegram(msg)
 
-    # Eğer haber yoksa → no-news mekanizmasına bırak
-    now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
-    if not new_items:
-        maybe_send_no_news(now_local)
+        # Eğer haber yoksa → no-news mekanizmasına bırak
+        now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
+        if not new_items:
+            maybe_send_no_news(now_local)
 
-    return len(new_items)
+        return len(new_items)
+    except Exception as e:
+        logger.critical(f"Ana JOB hatası: {e}")
+        return 0
 
 # ======================================================
 # FLASK
@@ -289,6 +313,7 @@ def health():
 def cron():
     t = request.args.get("token", "")
     if CRON_TOKEN and t != CRON_TOKEN:
+        logger.warning("Yetkisiz CRON isteği!")
         return jsonify({"ok": False, "error": "unauthorized"}), 403
 
     count = job()
