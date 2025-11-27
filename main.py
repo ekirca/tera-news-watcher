@@ -298,4 +298,3 @@ def cron():
 def test():
     send_telegram("🧪 Test bildirimi.")
     return "ok", 200
-
