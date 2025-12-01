@@ -55,7 +55,6 @@ def send_telegram(text: str) -> None:
             timeout=15,
         )
     except Exception:
-        # Telegram hatasına takılıp job çökmesin
         pass
 
 # ======================================================
@@ -79,7 +78,7 @@ def save_seen(seen: set) -> None:
         pass
 
 # ======================================================
-# NO-NEWS TAG (sadece saat başına bir kez)
+# NO-NEWS TAG
 # ======================================================
 def load_last_no_news_tag() -> Optional[str]:
     if not os.path.exists(LAST_NO_NEWS_FILE):
@@ -99,112 +98,68 @@ def save_last_no_news_tag(tag: str) -> None:
         pass
 
 def maybe_send_no_news(now_local: datetime) -> None:
-    """
-    Hafta içi 08:00–18:00 arası, saat başladıktan sonra ilk 10 dakika içinde
-    sadece bir kez 'Bugün yeni haber yok' mesajı gönderir.
-    Cron 09:00, 09:01, 09:05 fark etmez; o saat için bir kez çalışması yeter.
-    """
     # Hafta içi mi?
     if now_local.weekday() > 4:
         return
-
-    # Saat aralığı 08–18 arası mı?
+    # Saat 08-18 arası mı?
     if not (8 <= now_local.hour <= 18):
         return
-
-    # Saat başına 10 dakikalık tolerans penceresi:
-    if now_local.minute > 10:
+    # Saat başı toleransı
+    if now_local.minute > 15:
         return
 
-    tag = now_local.strftime("%Y-%m-%d %H")  # örn: "2025-11-26 09"
+    tag = now_local.strftime("%Y-%m-%d %H")
     last_tag = load_last_no_news_tag()
 
     if last_tag == tag:
-        # Bu saat için daha önce mesaj atılmış
         return
 
-    # Mesajı gönder ve tag'i kaydet
     msg = f"🟡 Bugün ({now_local.date()}) TERA ile ilgili yeni haber yok."
     send_telegram(msg)
     save_last_no_news_tag(tag)
 
 # ======================================================
-# ⭐ ADVANCED DATE PARSER
+# DATE PARSER
 # ======================================================
 def parse_date(entry) -> Optional[datetime]:
-    """En güvenilir → en zayıf sırayla 4 katmanlı tarih çözümü."""
-
-    # 1) published_parsed
     if getattr(entry, "published_parsed", None):
         try:
-            return datetime.fromtimestamp(
-                time.mktime(entry.published_parsed),
-                tz=timezone.utc,
-            )
-        except Exception:
-            pass
-
-    # 2) updated_parsed
+            return datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+        except: pass
     if getattr(entry, "updated_parsed", None):
         try:
-            return datetime.fromtimestamp(
-                time.mktime(entry.updated_parsed),
-                tz=timezone.utc,
-            )
-        except Exception:
-            pass
-
-    # 3) published / updated / pubDate string alanlarından parse etme
+            return datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
+        except: pass
     for field in ["published", "updated", "pubDate"]:
         if field in entry:
             try:
-                # String alanı feedparser ile ayrıştırmayı dener
                 fake = feedparser.parse(entry[field])
                 if fake.entries and getattr(fake.entries[0], "published_parsed", None):
-                    return datetime.fromtimestamp(
-                        time.mktime(fake.entries[0].published_parsed),
-                        tz=timezone.utc,
-                    )
-            except Exception:
-                pass
-
-    # 4) hiçbir şey yok → tarihsiz haber → reddet
+                    return datetime.fromtimestamp(time.mktime(fake.entries[0].published_parsed), tz=timezone.utc)
+            except: pass
     return None
 
 def is_today(dt: datetime) -> bool:
-    if not dt:
-        return False
+    if not dt: return False
     now_utc = datetime.now(timezone.utc)
     local_dt = dt + timedelta(hours=TZ_OFFSET)
     today_local = (now_utc + timedelta(hours=TZ_OFFSET)).date()
     return local_dt.date() == today_local
 
 # ======================================================
-# DOMAIN FILTER
+# DOMAIN FILTER & FEEDS
 # ======================================================
 ALLOWED = {
-    "kap.org.tr",
-    "borsagundem.com",
-    "bloomberght.com",
-    "investing.com",
-    "mynet.com",
-    "bigpara.com",
-    "terayatirim.com",
-    "terayatirim.com.tr",
-    "x.com",
-    "twitter.com",
+    "kap.org.tr", "borsagundem.com", "bloomberght.com", "investing.com",
+    "mynet.com", "bigpara.com", "terayatirim.com", "terayatirim.com.tr",
+    "x.com", "twitter.com"
 }
-
 def domain_ok(link: str) -> bool:
     try:
         host = urlparse(link).hostname or ""
         return any(host.endswith(d) for d in ALLOWED)
-    except Exception:
-        return False
+    except: return False
 
-# ======================================================
-# FEEDS
-# ======================================================
 FEEDS = [
     ("Tera Yatırım", "https://news.google.com/rss/search?q=Tera+Yatırım&hl=tr&gl=TR&ceid=TR:tr"),
     ("Tera Yatirim", "https://news.google.com/rss/search?q=Tera+Yatirim&hl=tr&gl=TR&ceid=TR:tr"),
@@ -214,32 +169,20 @@ FEEDS = [
     ("FSU",          "https://news.google.com/rss/search?q=FSU&hl=tr&gl=TR&ceid=TR:tr"),
 ]
 
-# ======================================================
-# FEED FETCHER
-# ======================================================
 def fetch_feed(name: str, url: str) -> list[NewsItem]:
     try:
         r = SESSION.get(url, timeout=20)
         feed = feedparser.parse(r.text)
-        out: list[NewsItem] = []
-
+        out = []
         for entry in feed.entries:
             dt = parse_date(entry)
-            if not dt:
-                continue
-            if not is_today(dt):
-                continue
-
+            if not dt or not is_today(dt): continue
             link = entry.get("link", "")
-            if not domain_ok(link):
-                continue
-
+            if not domain_ok(link): continue
             _id = entry.get("id") or entry.get("link") or entry.get("title", "")
             out.append(NewsItem(dt, name, entry, _id))
-
         return out
-    except Exception:
-        return []
+    except: return []
 
 # ======================================================
 # JOB
@@ -247,32 +190,24 @@ def fetch_feed(name: str, url: str) -> list[NewsItem]:
 def job() -> int:
     try:
         seen = load_seen()
-        new_items: list[NewsItem] = []
-
+        new_items = []
         for name, url in FEEDS:
             items = fetch_feed(name, url)
             for it in items:
                 if it.item_id not in seen:
                     new_items.append(it)
                     seen.add(it.item_id)
-
         save_seen(seen)
         new_items.sort(key=lambda x: x.published_dt)
-
-        # Yeni haberleri gönder
         for it in new_items:
             msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
             send_telegram(msg)
-
-        # Eğer haber yoksa → no-news mekanizmasına bırak
+        
         now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
         if not new_items:
             maybe_send_no_news(now_local)
-
         return len(new_items)
-    except Exception:
-        # Ana JOB hatasını sessizce yut, uygulamanın çökmesini engelle
-        return 0
+    except: return 0
 
 # ======================================================
 # FLASK
@@ -285,17 +220,13 @@ def home():
 
 @app.get("/health")
 def health():
-    # UptimeRobot ve Render bu endpoint'i kontrol ediyor
-    # Sadece 200 OK dönmesi yeterli
     return "ok", 200
-
 
 @app.get("/cron")
 def cron():
     t = request.args.get("token", "")
     if CRON_TOKEN and t != CRON_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
-
     count = job()
     return jsonify({"ok": True, "new_items": count}), 200
 
