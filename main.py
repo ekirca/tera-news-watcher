@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY (24H WINDOW + NO-NEWS TAG)
-Güncelleme: Artık sadece "takvim günü"ne değil, son 24-36 saate bakar.
-Böylece gece düşen veya Google'ın geç indekslediği haberler sabah kaçmaz.
+TERA NEWS WATCHER – FINAL UNBLOCKED EDITION
+1. Domain filtresi kaldırıldı (Google linkleri artık engellenmiyor).
+2. Dakika sınırı kaldırıldı (Saat içinde her an bildirim atabilir).
+3. Tarih filtresi: Son 36 saat (Gece gelen haberleri kaçırmaz).
 """
 
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 from typing import NamedTuple, Optional
 
 import requests
@@ -16,20 +16,24 @@ import feedparser
 from flask import Flask, jsonify, request
 
 # ======================================================
-# ENV
+# ENV & AYARLAR
 # ======================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 CRON_TOKEN         = os.getenv("CRON_TOKEN", "").strip()
-
-TZ_OFFSET = int(os.getenv("TZ_OFFSET_HOURS", "3"))
-SESSION = requests.Session()
+TZ_OFFSET          = int(os.getenv("TZ_OFFSET_HOURS", "3"))
 
 SEEN_FILE = "seen_ids.txt"
 LAST_NO_NEWS_FILE = "last_no_news_tag.txt"
 
+# Google'ın bizi bot sanıp engellememesi için tarayıcı kimliği
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+})
+
 # ======================================================
-# NEWS STRUCT
+# DATA YAPILARI
 # ======================================================
 class NewsItem(NamedTuple):
     published_dt: datetime
@@ -38,7 +42,7 @@ class NewsItem(NamedTuple):
     item_id: str
 
 # ======================================================
-# TELEGRAM
+# TELEGRAM FONKSİYONU
 # ======================================================
 def send_telegram(text: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -58,7 +62,7 @@ def send_telegram(text: str) -> None:
         pass
 
 # ======================================================
-# SEEN SYSTEM
+# DOSYA YÖNETİMİ (Seen & Tags)
 # ======================================================
 def load_seen() -> set:
     if not os.path.exists(SEEN_FILE):
@@ -77,9 +81,6 @@ def save_seen(seen: set) -> None:
     except Exception:
         pass
 
-# ======================================================
-# NO-NEWS TAG
-# ======================================================
 def load_last_no_news_tag() -> Optional[str]:
     if not os.path.exists(LAST_NO_NEWS_FILE):
         return None
@@ -97,26 +98,26 @@ def save_last_no_news_tag(tag: str) -> None:
     except Exception:
         pass
 
+# ======================================================
+# HABER YOK BİLDİRİMİ
+# ======================================================
 def maybe_send_no_news(now_local: datetime) -> None:
     """
     Hafta içi 08:00–18:00 arası.
-    Saat başından sonraki ilk 20 dakikada çalışırsa bildirim atar.
+    Dakika sınırı YOK. O saat için atılmadıysa atar.
     """
-    # Hafta içi mi? (0=Pzt ... 4=Cum)
+    # Hafta sonu mu? (Cumartesi=5, Pazar=6)
     if now_local.weekday() > 4:
         return
 
-    # Saat aralığı 08–18 arası mı?
+    # Mesai saatleri dışı mı?
     if not (8 <= now_local.hour <= 18):
-        return
-
-    # Saat başı toleransı (Artık 20 dk, çünkü cron 12 dk'da bir çalışıyor)
-    if now_local.minute > 20:
         return
 
     tag = now_local.strftime("%Y-%m-%d %H")
     last_tag = load_last_no_news_tag()
 
+    # Bu saat için zaten mesaj attıysak sus.
     if last_tag == tag:
         return
 
@@ -125,17 +126,21 @@ def maybe_send_no_news(now_local: datetime) -> None:
     save_last_no_news_tag(tag)
 
 # ======================================================
-# DATE PARSER & FILTER (GÜNCELLENDİ)
+# TARİH AYRIŞTIRMA (Son 36 Saat)
 # ======================================================
 def parse_date(entry) -> Optional[datetime]:
+    # RSS'ten tarih bilgisini çekmeyi dener
     if getattr(entry, "published_parsed", None):
         try:
             return datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
         except: pass
+        
     if getattr(entry, "updated_parsed", None):
         try:
             return datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
         except: pass
+        
+    # String formatları dener
     for field in ["published", "updated", "pubDate"]:
         if field in entry:
             try:
@@ -147,39 +152,20 @@ def parse_date(entry) -> Optional[datetime]:
 
 def is_recent(dt: datetime) -> bool:
     """
-    ESKİ: Sadece bugünün takvim tarihine bakıyordu.
-    YENİ: Son 36 saat içindeki her şeyi kabul eder.
-    Zaten 'seen_ids' olduğu için eski haberi tekrar atmaz.
-    Böylece gece gelen veya Google'a geç düşen haberler sabah yakalanır.
+    Takvim gününe bakmaz. Şu andan geriye doğru 36 saat içindeki her şeyi alır.
     """
-    if not dt:
-        return False
-    
+    if not dt: return False
     now_utc = datetime.now(timezone.utc)
-    # Haber tarihi ile şu an arasındaki fark
     diff = now_utc - dt
     
-    # Gelecek tarihli hatalı haberleri (spam) engelle (örn: +1 gün)
-    if diff.days < -1:
-        return False
-        
-    # Son 36 saat (1.5 gün) içindeyse kabul et
+    # Gelecek tarihli hatalı haberleri engelle
+    if diff.days < -1: return False
+    # 36 saatten eskiyse alma
     return diff <= timedelta(hours=36)
 
 # ======================================================
-# DOMAIN FILTER & FEEDS
+# FEED LİSTESİ (Filtreler burada yapılıyor zaten)
 # ======================================================
-ALLOWED = {
-    "kap.org.tr", "borsagundem.com", "bloomberght.com", "investing.com",
-    "mynet.com", "bigpara.com", "terayatirim.com", "terayatirim.com.tr",
-    "x.com", "twitter.com"
-}
-def domain_ok(link: str) -> bool:
-    try:
-        host = urlparse(link).hostname or ""
-        return any(host.endswith(d) for d in ALLOWED)
-    except: return False
-
 FEEDS = [
     ("Tera Yatırım", "https://news.google.com/rss/search?q=Tera+Yatırım&hl=tr&gl=TR&ceid=TR:tr"),
     ("Tera Yatirim", "https://news.google.com/rss/search?q=Tera+Yatirim&hl=tr&gl=TR&ceid=TR:tr"),
@@ -189,34 +175,41 @@ FEEDS = [
     ("FSU",          "https://news.google.com/rss/search?q=FSU&hl=tr&gl=TR&ceid=TR:tr"),
 ]
 
+# ======================================================
+# FEED ÇEKİCİ (Domain Filtresi Kaldırıldı!)
+# ======================================================
 def fetch_feed(name: str, url: str) -> list[NewsItem]:
     try:
         r = SESSION.get(url, timeout=20)
         feed = feedparser.parse(r.text)
         out = []
+
         for entry in feed.entries:
             dt = parse_date(entry)
             if not dt: continue
             
-            # GÜNCELLENDİ: is_today yerine is_recent kullanıyoruz
+            # Tarih kontrolü (Son 36 saat mi?)
             if not is_recent(dt):
                 continue
 
-            link = entry.get("link", "")
-            if not domain_ok(link): continue
+            # NOT: Domain filtresi kaldırıldı çünkü Google linkleri yönlendirmeli geliyor.
+            # Zaten RSS sorgumuzda 'site:kap.org.tr' vb. var, Google bizim için filtreliyor.
             
             _id = entry.get("id") or entry.get("link") or entry.get("title", "")
             out.append(NewsItem(dt, name, entry, _id))
+
         return out
-    except: return []
+    except Exception:
+        return []
 
 # ======================================================
-# JOB
+# ANA GÖREV (JOB)
 # ======================================================
 def job() -> int:
     try:
         seen = load_seen()
         new_items = []
+
         for name, url in FEEDS:
             items = fetch_feed(name, url)
             for it in items:
@@ -227,21 +220,26 @@ def job() -> int:
         save_seen(seen)
         new_items.sort(key=lambda x: x.published_dt)
         
+        # 1. Yeni haberleri gönder
         for it in new_items:
-            msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
+            # Başlık ve Linki temizle
+            title = it.entry.get('title', 'Haber Başlığı Yok')
+            link = it.entry.get('link', '#')
+            
+            msg = f"📰 <b>{it.feed_name}</b>\n{title}\n{link}"
             send_telegram(msg)
         
+        # 2. Haber yoksa ve zamanıysa "Haber Yok" bildirimi at
         now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
-        
-        # Sadece hiç haber yoksa "Haber Yok" mesajı at
         if not new_items:
             maybe_send_no_news(now_local)
             
         return len(new_items)
-    except: return 0
+    except Exception:
+        return 0
 
 # ======================================================
-# FLASK
+# FLASK SERVER
 # ======================================================
 app = Flask(__name__)
 
@@ -258,10 +256,11 @@ def cron():
     t = request.args.get("token", "")
     if CRON_TOKEN and t != CRON_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 403
+
     count = job()
     return jsonify({"ok": True, "new_items": count}), 200
 
 @app.get("/test")
 def test():
-    send_telegram("🧪 Test bildirimi.")
+    send_telegram("🧪 Sistem Testi Başarılı.")
     return "ok", 200
