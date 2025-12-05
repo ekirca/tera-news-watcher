@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY (DATE ENGINE + NO-NEWS TAG)
-Sadece bugünün haberlerini çeker, eski haberi asla göndermez.
-'Haber yok' mesajını saat içinde sadece bir kere yazar.
+TERA NEWS WATCHER – FINAL ULTRA-STABLE MAIN.PY (24H WINDOW + NO-NEWS TAG)
+Güncelleme: Artık sadece "takvim günü"ne değil, son 24-36 saate bakar.
+Böylece gece düşen veya Google'ın geç indekslediği haberler sabah kaçmaz.
 """
 
 import os
@@ -98,14 +98,20 @@ def save_last_no_news_tag(tag: str) -> None:
         pass
 
 def maybe_send_no_news(now_local: datetime) -> None:
-    # Hafta içi mi?
+    """
+    Hafta içi 08:00–18:00 arası.
+    Saat başından sonraki ilk 20 dakikada çalışırsa bildirim atar.
+    """
+    # Hafta içi mi? (0=Pzt ... 4=Cum)
     if now_local.weekday() > 4:
         return
-    # Saat 08-18 arası mı?
+
+    # Saat aralığı 08–18 arası mı?
     if not (8 <= now_local.hour <= 18):
         return
-    # Saat başı toleransı
-    if now_local.minute > 15:
+
+    # Saat başı toleransı (Artık 20 dk, çünkü cron 12 dk'da bir çalışıyor)
+    if now_local.minute > 20:
         return
 
     tag = now_local.strftime("%Y-%m-%d %H")
@@ -119,7 +125,7 @@ def maybe_send_no_news(now_local: datetime) -> None:
     save_last_no_news_tag(tag)
 
 # ======================================================
-# DATE PARSER
+# DATE PARSER & FILTER (GÜNCELLENDİ)
 # ======================================================
 def parse_date(entry) -> Optional[datetime]:
     if getattr(entry, "published_parsed", None):
@@ -139,12 +145,26 @@ def parse_date(entry) -> Optional[datetime]:
             except: pass
     return None
 
-def is_today(dt: datetime) -> bool:
-    if not dt: return False
+def is_recent(dt: datetime) -> bool:
+    """
+    ESKİ: Sadece bugünün takvim tarihine bakıyordu.
+    YENİ: Son 36 saat içindeki her şeyi kabul eder.
+    Zaten 'seen_ids' olduğu için eski haberi tekrar atmaz.
+    Böylece gece gelen veya Google'a geç düşen haberler sabah yakalanır.
+    """
+    if not dt:
+        return False
+    
     now_utc = datetime.now(timezone.utc)
-    local_dt = dt + timedelta(hours=TZ_OFFSET)
-    today_local = (now_utc + timedelta(hours=TZ_OFFSET)).date()
-    return local_dt.date() == today_local
+    # Haber tarihi ile şu an arasındaki fark
+    diff = now_utc - dt
+    
+    # Gelecek tarihli hatalı haberleri (spam) engelle (örn: +1 gün)
+    if diff.days < -1:
+        return False
+        
+    # Son 36 saat (1.5 gün) içindeyse kabul et
+    return diff <= timedelta(hours=36)
 
 # ======================================================
 # DOMAIN FILTER & FEEDS
@@ -176,9 +196,15 @@ def fetch_feed(name: str, url: str) -> list[NewsItem]:
         out = []
         for entry in feed.entries:
             dt = parse_date(entry)
-            if not dt or not is_today(dt): continue
+            if not dt: continue
+            
+            # GÜNCELLENDİ: is_today yerine is_recent kullanıyoruz
+            if not is_recent(dt):
+                continue
+
             link = entry.get("link", "")
             if not domain_ok(link): continue
+            
             _id = entry.get("id") or entry.get("link") or entry.get("title", "")
             out.append(NewsItem(dt, name, entry, _id))
         return out
@@ -197,15 +223,20 @@ def job() -> int:
                 if it.item_id not in seen:
                     new_items.append(it)
                     seen.add(it.item_id)
+        
         save_seen(seen)
         new_items.sort(key=lambda x: x.published_dt)
+        
         for it in new_items:
             msg = f"📰 <b>{it.feed_name}</b>\n{it.entry.get('title','')}\n{it.entry.get('link','')}"
             send_telegram(msg)
         
         now_local = datetime.now(timezone.utc) + timedelta(hours=TZ_OFFSET)
+        
+        # Sadece hiç haber yoksa "Haber Yok" mesajı at
         if not new_items:
             maybe_send_no_news(now_local)
+            
         return len(new_items)
     except: return 0
 
